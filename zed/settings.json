@@ -44,7 +44,6 @@
   },
   "outline_panel": { "dock": "right" },
   "collaboration_panel": { "dock": "right" },
-  "notification_panel": { "dock": "right" },
   "agent": { "dock": "right"  },
   "centered_layout": {
     "left_padding": 0.1,
