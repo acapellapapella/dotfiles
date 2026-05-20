@@ -9,7 +9,9 @@
   "modules-left": [
     "clock",
     "custom/separator",
-    "custom/ai"
+    "custom/ai",
+    "custom/separator",
+    "custom/spotify"
   ],
 
   "modules-center": [
@@ -90,6 +92,13 @@
   "custom/ai": {
     "format": "🤖",
     "on-click": "bash -c '~/.local/bin/to_ai.sh'",
+    "tooltip": false
+  },
+
+  "custom/spotify": {
+  	"exec": "bash -c '~/.local/bin/current_track_spotify.sh'",
+    "return-type": "plain",
+    "interval": 0,
     "tooltip": false
   },
 
