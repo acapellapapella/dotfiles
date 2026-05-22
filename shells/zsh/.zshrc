@@ -25,3 +25,5 @@ ZSH_HIGHLIGHT_STYLES[double-hyphen-option]='fg=yellow'
 ZSH_HIGHLIGHT_STYLES[argument]='fg=white'
 
 bindkey '^H' backward-kill-word
+
+export PATH="$HOME/.local/bin:$PATH"
