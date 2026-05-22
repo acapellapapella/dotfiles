@@ -20,3 +20,5 @@ ZSH_HIGHLIGHT_STYLES[path]='fg=cyan,underline'
 ZSH_HIGHLIGHT_STYLES[single-hyphen-option]='fg=yellow'
 ZSH_HIGHLIGHT_STYLES[double-hyphen-option]='fg=yellow'
 ZSH_HIGHLIGHT_STYLES[argument]='fg=white'
+
+bindkey '^H' backward-kill-word
