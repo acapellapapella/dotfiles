@@ -95,7 +95,8 @@
   },
 
   "custom/spotify": {
-  	"exec": "bash -c '~/.local/bin/current_track_spotify.sh'",
+  	// https://github.com/acapellapapella/dbus-media-track.git
+ 	"exec": "~/.local/bin/dbus-media-track --service --player spotify \"	Now playing:\" --artist \"—\" --title",
     "return-type": "plain",
     "interval": 0,
     "tooltip": false
