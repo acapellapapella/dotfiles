@@ -1,0 +1,3 @@
+[submodule "desktop/compositor/niri/scripts/dbus-media-track"]
+	path = desktop/compositor/niri/scripts/dbus-media-track
+	url = https://github.com/acapellapapella/dbus-media-track.git
