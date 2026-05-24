@@ -12,9 +12,7 @@ window-rule {
 // Kitty
 window-rule {
     match app-id="kitty"
-
     opacity 0.83
-
     background-effect {
         xray false
         blur true
@@ -23,7 +21,8 @@ window-rule {
 
 // Nautilus
 window-rule {
-    match app-id="nautilus"
+    match app-id=r#".*Nautilus.*"#
+    open-floating true
     default-column-width { fixed 1000; }
 }
 
@@ -51,9 +50,28 @@ window-rule {
 
 // maximized
 
+
+// Telegram
+window-rule {
+    match app-id=r#".*telegram.*"#
+    open-maximized true
+}
+
 // Firefox
 window-rule {
     match app-id=r#".*firefox.*"#
+    open-maximized true
+}
+
+// Helium
+window-rule {
+    match app-id=r#"^helium$"#
+    open-maximized true
+}
+
+// Discord
+window-rule {
+    match app-id=r#"^discord$"#
     open-maximized true
 }
 
