@@ -1,0 +1,15 @@
+[geometry]
+width = 300
+height = 300
+gap = 8
+
+[margins]
+top = 40
+right = 8
+bottom = 8 
+
+[interaction]
+position = "right"
+peek = 20
+focus_peek = 308
+sticky = false
