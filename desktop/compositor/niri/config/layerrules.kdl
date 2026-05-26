@@ -1,1 +1,17 @@
-// empty
+layer-rule {
+    match namespace="rofi"
+    shadow {
+        on
+        softness 60
+        spread 0
+        offset x=0 y=8
+        color "#00000066"
+    }
+    geometry-corner-radius 24
+    background-effect {
+        xray false
+        blur true
+        noise 0.02
+        saturation 1.4
+    }
+}
