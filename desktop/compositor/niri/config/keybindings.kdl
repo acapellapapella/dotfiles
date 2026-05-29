@@ -23,14 +23,16 @@ binds {
     Mod+Up { focus-window-up; }
     Mod+Down { focus-window-down; }
     Mod+C { center-column; }
-    Mod+Shift+Left  { move-column-left; }
+    Mod+Shift+Left { move-column-left; }
     Mod+Shift+Right { move-column-right; }
+    Modd+Shift+Up { move-window-to-workspace-up; }
+    Mod+Shift+Down { move-window-to-workspace-down; }
 
     // Sidebar
     Mod+S { spawn-sh "niri-sidebar toggle-window"; }
     Mod+Shift+S { spawn-sh "niri-sidebar toggle-visibility"; }
     Mod+Ctrl+S { spawn-sh "niri-sidebar flip"; }
-    
+
     // Float
     Mod+T { toggle-window-floating; }
 
