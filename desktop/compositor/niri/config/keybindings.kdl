@@ -15,6 +15,7 @@ binds {
 
     // Focus
     Alt+Tab { toggle-overview; }
+    Mod+Tab { focus-monitor-next; }
     Mod+Ctrl+Down { focus-workspace-down; }
     Mod+Ctrl+Up { focus-workspace-up; }
 
