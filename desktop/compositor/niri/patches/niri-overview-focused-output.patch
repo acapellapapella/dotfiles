@@ -1,0 +1,209 @@
+diff --git a/src/layout/mod.rs b/src/layout/mod.rs
+index 5c4dd639..6207d00b 100644
+--- a/src/layout/mod.rs
++++ b/src/layout/mod.rs
+@@ -364,6 +364,8 @@ pub struct Layout<W: LayoutElement> {
+     overview_open: bool,
+     /// The overview zoom progress.
+     overview_progress: Option<OverviewProgress>,
++    /// Output the overview is shown on; other outputs render as if it is closed.
++    overview_output: Option<Output>,
+     /// Configurable properties of the layout.
+     options: Rc<Options>,
+ }
+@@ -703,6 +705,7 @@ impl<W: LayoutElement> Layout<W> {
+             update_render_elements_time: Duration::ZERO,
+             overview_open: false,
+             overview_progress: None,
++            overview_output: None,
+             options: Rc::new(options),
+         }
+     }
+@@ -728,6 +731,7 @@ impl<W: LayoutElement> Layout<W> {
+             update_render_elements_time: Duration::ZERO,
+             overview_open: false,
+             overview_progress: None,
++            overview_output: None,
+             options: opts,
+         }
+     }
+@@ -837,7 +841,9 @@ impl<W: LayoutElement> Layout<W> {
+                     active_monitor_idx: 0,
+                 }
+             }
+-        }
++        };
++
++        self.set_monitors_overview_state();
+     }
+ 
+     pub fn remove_output(&mut self, output: &Output) {
+@@ -2302,7 +2308,7 @@ impl<W: LayoutElement> Layout<W> {
+         if let Some(InteractiveMoveState::Moving(move_)) = &self.interactive_move {
+             if move_.output == *output {
+                 if self.overview_progress.is_some() {
+-                    let zoom = self.overview_zoom();
++                    let zoom = self.interactive_move_zoom();
+                     let tile_pos = move_.tile_render_location(zoom);
+                     let pos_within_tile = (pos_within_output - tile_pos).downscale(zoom);
+                     // During the overview animation, we cannot do input hits because we cannot
+@@ -2501,11 +2507,16 @@ impl<W: LayoutElement> Layout<W> {
+                 "monitor base options must be synchronized with layout"
+             );
+ 
+-            assert_eq!(self.overview_open, monitor.overview_open);
+-            assert_eq!(
+-                self.overview_progress.as_ref().map(|p| p.value()),
+-                monitor.overview_progress_value()
+-            );
++            if self.overview_output.as_ref() == Some(&monitor.output) {
++                assert_eq!(self.overview_open, monitor.overview_open);
++                assert_eq!(
++                    self.overview_progress.as_ref().map(|p| p.value()),
++                    monitor.overview_progress_value()
++                );
++            } else {
++                assert!(!monitor.overview_open);
++                assert_eq!(monitor.overview_progress_value(), None);
++            }
+ 
+             monitor.verify_invariants();
+ 
+@@ -2709,10 +2720,22 @@ impl<W: LayoutElement> Layout<W> {
+             }
+         }
+ 
++        // Move the overview along with the focus to another output.
++        if self.overview_open && self.set_overview_output_to_active() {
++            self.overview_progress = Some(OverviewProgress::Animation(Animation::new(
++                self.clock.clone(),
++                0.,
++                1.,
++                0.,
++                self.options.animations.overview_open_close.0,
++            )));
++        }
++
++        self.set_monitors_overview_state();
++
+         match &mut self.monitor_set {
+             MonitorSet::Normal { monitors, .. } => {
+                 for mon in monitors {
+-                    mon.set_overview_progress(self.overview_progress.as_ref());
+                     mon.advance_animations();
+                 }
+             }
+@@ -2771,7 +2794,9 @@ impl<W: LayoutElement> Layout<W> {
+ 
+         self.update_render_elements_time = self.clock.now();
+ 
+-        let zoom = self.overview_zoom();
++        self.set_monitors_overview_state();
++
++        let zoom = self.interactive_move_zoom();
+         if let Some(InteractiveMoveState::Moving(move_)) = &mut self.interactive_move {
+             if output.is_none_or(|output| move_.output == *output) {
+                 let pos_within_output = move_.tile_render_location(zoom);
+@@ -2810,7 +2835,6 @@ impl<W: LayoutElement> Layout<W> {
+                 let is_active = self.is_active
+                     && idx == *active_monitor_idx
+                     && !matches!(self.interactive_move, Some(InteractiveMoveState::Moving(_)));
+-                mon.set_overview_progress(self.overview_progress.as_ref());
+                 mon.update_render_elements(is_active);
+             }
+         }
+@@ -3722,7 +3746,10 @@ impl<W: LayoutElement> Layout<W> {
+     pub fn overview_gesture_begin(&mut self) {
+         self.overview_open = true;
+ 
+-        let value = self.overview_progress.take().map_or(0., |p| p.value());
++        let mut value = self.overview_progress.take().map_or(0., |p| p.value());
++        if self.set_overview_output_to_active() {
++            value = 0.;
++        }
+         let gesture = OverviewGesture {
+             tracker: SwipeTracker::new(),
+             start: value,
+@@ -3877,7 +3904,7 @@ impl<W: LayoutElement> Layout<W> {
+                     return false;
+                 }
+ 
+-                let zoom = self.overview_zoom();
++                let zoom = self.interactive_move_zoom();
+                 let delta = delta.downscale(zoom);
+ 
+                 pointer_delta += delta;
+@@ -4588,15 +4615,43 @@ impl<W: LayoutElement> Layout<W> {
+         };
+ 
+         for mon in monitors {
+-            mon.overview_open = self.overview_open;
+-            mon.set_overview_progress(self.overview_progress.as_ref());
++            if self.overview_output.as_ref() == Some(&mon.output) {
++                mon.overview_open = self.overview_open;
++                mon.set_overview_progress(self.overview_progress.as_ref());
++            } else {
++                mon.overview_open = false;
++                mon.set_overview_progress(None);
++            }
+         }
+     }
+ 
++    /// Returns whether the overview output changed.
++    fn set_overview_output_to_active(&mut self) -> bool {
++        let output = self.active_output().cloned();
++        if self.overview_output == output {
++            return false;
++        }
++
++        self.overview_output = output;
++        true
++    }
++
++    /// Overview zoom of the output where the interactive move happens.
++    fn interactive_move_zoom(&self) -> f64 {
++        let mon = match &self.interactive_move {
++            Some(InteractiveMoveState::Moving(move_)) => self.monitor_for_output(&move_.output),
++            _ => self.active_monitor_ref(),
++        };
++        mon.map_or(1., |mon| mon.overview_zoom())
++    }
++
+     pub fn toggle_overview(&mut self) {
+         self.overview_open = !self.overview_open;
+ 
+-        let from = self.overview_progress.take().map_or(0., |p| p.value());
++        let mut from = self.overview_progress.take().map_or(0., |p| p.value());
++        if self.overview_open && self.set_overview_output_to_active() {
++            from = 0.;
++        }
+         let to = if self.overview_open { 1. } else { 0. };
+ 
+         self.overview_progress = Some(OverviewProgress::Animation(Animation::new(
+@@ -4659,7 +4714,7 @@ impl<W: LayoutElement> Layout<W> {
+     ) {
+         let _span = tracy_client::span!("Layout::store_unmap_snapshot");
+ 
+-        let zoom = self.overview_zoom();
++        let zoom = self.interactive_move_zoom();
+ 
+         if let Some(InteractiveMoveState::Moving(move_)) = &mut self.interactive_move {
+             if move_.tile.window().id() == window {
+@@ -4753,7 +4808,7 @@ impl<W: LayoutElement> Layout<W> {
+     ) {
+         let _span = tracy_client::span!("Layout::start_close_animation_for_window");
+ 
+-        let zoom = self.overview_zoom();
++        let zoom = self.interactive_move_zoom();
+ 
+         if let Some(InteractiveMoveState::Moving(move_)) = &mut self.interactive_move {
+             if move_.tile.window().id() == window {
+@@ -4825,7 +4880,7 @@ impl<W: LayoutElement> Layout<W> {
+         }
+ 
+         let scale = Scale::from(move_.output.current_scale().fractional_scale());
+-        let zoom = self.overview_zoom();
++        let zoom = self.interactive_move_zoom();
+         let pos_in_backdrop = move_.tile_render_location(zoom);
+         let xray_pos = XrayPos::new(pos_in_backdrop, zoom);
+ 
