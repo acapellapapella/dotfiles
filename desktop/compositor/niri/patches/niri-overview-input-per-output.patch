@@ -1,0 +1,100 @@
+diff --git a/src/input/mod.rs b/src/input/mod.rs
+index 10c1d02c..fcef6ef8 100644
+--- a/src/input/mod.rs
++++ b/src/input/mod.rs
+@@ -2906,7 +2906,7 @@ impl State {
+             self.niri.pointer_visibility = PointerVisibility::Visible;
+             self.niri.tablet_cursor_location = None;
+ 
+-            let is_overview_open = self.niri.layout.is_overview_open();
++            let is_overview_open = self.niri.is_overview_open_under_cursor();
+ 
+             if is_overview_open && !pointer.is_grabbed() && button == Some(MouseButton::Right) {
+                 if let Some((output, ws)) = self.niri.workspace_under_cursor(true) {
+@@ -4080,7 +4080,7 @@ impl State {
+             }
+         }
+ 
+-        let is_overview_open = self.niri.layout.is_overview_open();
++        let is_overview_open = self.niri.is_overview_open_under_cursor();
+ 
+         if let Some((cx, cy)) = &mut self.niri.gesture_swipe_3f_cumulative {
+             *cx += delta_x;
+diff --git a/src/input/move_grab.rs b/src/input/move_grab.rs
+index b10db89b..d4723557 100644
+--- a/src/input/move_grab.rs
++++ b/src/input/move_grab.rs
+@@ -93,8 +93,10 @@ impl MoveGrab {
+                             .then(|| (mon.map(|mon| mon.output().clone()), ws_idx))
+                     });
+                     if let Some((Some(output), ws_idx)) = res {
+-                        layout.focus_output(&output);
+-                        layout.toggle_overview_to_workspace(ws_idx);
++                        if layout.is_overview_open_on(&output) {
++                            layout.focus_output(&output);
++                            layout.toggle_overview_to_workspace(ws_idx);
++                        }
+                     }
+                 }
+ 
+diff --git a/src/layout/mod.rs b/src/layout/mod.rs
+index 7cf70ed3..11f97ba5 100644
+--- a/src/layout/mod.rs
++++ b/src/layout/mod.rs
+@@ -5090,6 +5090,11 @@ impl<W: LayoutElement> Layout<W> {
+     pub fn is_overview_open(&self) -> bool {
+         self.overview_open
+     }
++
++    /// Whether the overview is open on this specific output.
++    pub fn is_overview_open_on(&self, output: &Output) -> bool {
++        self.overview_open && self.overview_output.as_ref() == Some(output)
++    }
+ }
+ 
+ impl<W: LayoutElement> Default for MonitorSet<W> {
+diff --git a/src/niri.rs b/src/niri.rs
+index 17f4c1bb..f0e35704 100644
+--- a/src/niri.rs
++++ b/src/niri.rs
+@@ -3447,7 +3447,7 @@ impl Niri {
+         output: &Output,
+         pos_within_output: Point<f64, Logical>,
+     ) -> bool {
+-        if self.layout.is_overview_open() {
++        if self.layout.is_overview_open_on(output) {
+             return false;
+         }
+ 
+@@ -3693,7 +3693,7 @@ impl Niri {
+         let mut under =
+             layer_popup_under(Layer::Overlay).or_else(|| layer_toplevel_under(Layer::Overlay));
+ 
+-        let is_overview_open = self.layout.is_overview_open();
++        let is_overview_open = self.layout.is_overview_open_on(output);
+ 
+         // When rendering above the top layer, we put the regular monitor elements first.
+         // Otherwise, we will render all layer-shell pop-ups and the top layer on top.
+@@ -3758,6 +3758,12 @@ impl Niri {
+         self.global_space.output_under(pos).next().cloned()
+     }
+ 
++    /// Whether the overview is open on the output under the cursor.
++    pub fn is_overview_open_under_cursor(&self) -> bool {
++        self.output_under_cursor()
++            .is_some_and(|output| self.layout.is_overview_open_on(&output))
++    }
++
+     pub fn output_left_of(&self, current: &Output) -> Option<Output> {
+         let current_geo = self.global_space.output_geometry(current)?;
+         let extended_geo = Rectangle::new(
+@@ -6953,7 +6959,8 @@ impl Niri {
+         }
+ 
+         if let Some(window) = &new_focus.window {
+-            if !self.layout.is_overview_open() && current_focus.window.as_ref() != Some(window) {
++            if !self.is_overview_open_under_cursor() && current_focus.window.as_ref() != Some(window)
++            {
+                 let (window, hit) = window;
+ 
+                 // Don't trigger focus-follows-mouse over the tab indicator.
