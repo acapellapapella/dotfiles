@@ -1,0 +1,114 @@
+diff --git a/src/input/mod.rs b/src/input/mod.rs
+index fcef6ef8..c3707bec 100644
+--- a/src/input/mod.rs
++++ b/src/input/mod.rs
+@@ -2595,6 +2595,9 @@ impl State {
+             }
+         }
+ 
++        // Keep the physical position when moving onto an output with a different pixel density.
++        new_pos = self.niri.remap_pointer_across_outputs(pos, new_pos);
++
+         if self
+             .niri
+             .global_space
+diff --git a/src/niri.rs b/src/niri.rs
+index f0e35704..13a55278 100644
+--- a/src/niri.rs
++++ b/src/niri.rs
+@@ -3345,6 +3345,95 @@ impl Niri {
+         Some((output, pos_within_output))
+     }
+ 
++    /// Remaps a pointer moving from one output onto an adjacent one so that it keeps its
++    /// physical position along the shared edge.
++    ///
++    /// Outputs can have different physical pixel densities, so the same logical coordinate
++    /// ends up at different physical heights. The center of the outputs' overlap along the
++    /// edge keeps its logical coordinate, and distances from it are scaled by the ratio of
++    /// millimeters per logical pixel of the two outputs. Physical sizes come from EDID; if
++    /// either output doesn't report one, the position is left as is.
++    pub fn remap_pointer_across_outputs(
++        &self,
++        pos: Point<f64, Logical>,
++        new_pos: Point<f64, Logical>,
++    ) -> Point<f64, Logical> {
++        let Some(from) = self.global_space.output_under(pos).next() else {
++            return new_pos;
++        };
++        let from_geo = self.global_space.output_geometry(from).unwrap().to_f64();
++        if from_geo.contains(new_pos) {
++            return new_pos;
++        }
++
++        let mm_per_px = |output: &Output, geo: Rectangle<f64, Logical>| {
++            let size_mm = output
++                .current_transform()
++                .transform_size(output.physical_properties().size);
++            (size_mm.w > 0 && size_mm.h > 0)
++                .then(|| (size_mm.w as f64 / geo.size.w, size_mm.h as f64 / geo.size.h))
++        };
++        let Some(from_mm) = mm_per_px(from, from_geo) else {
++            return new_pos;
++        };
++
++        let remap =
++            |coord: f64, from_start: f64, from_len: f64, to_start: f64, to_len: f64, ratio: f64| {
++                let start = f64::max(from_start, to_start);
++                let end = f64::min(from_start + from_len, to_start + to_len);
++                let center = (start + end) / 2.;
++                center + (coord - center) * ratio
++            };
++
++        let in_range = |v: f64, start: f64, len: f64| start <= v && v < start + len;
++
++        for to in self.global_space.outputs() {
++            if to == from {
++                continue;
++            }
++
++            let to_geo = self.global_space.output_geometry(to).unwrap().to_f64();
++            let Some(to_mm) = mm_per_px(to, to_geo) else {
++                continue;
++            };
++
++            let mut remapped = new_pos;
++            if in_range(new_pos.x, to_geo.loc.x, to_geo.size.w)
++                && !in_range(new_pos.x, from_geo.loc.x, from_geo.size.w)
++            {
++                // Crossed a vertical edge: keep the physical height.
++                remapped.y = remap(
++                    new_pos.y,
++                    from_geo.loc.y,
++                    from_geo.size.h,
++                    to_geo.loc.y,
++                    to_geo.size.h,
++                    from_mm.1 / to_mm.1,
++                );
++            } else if in_range(new_pos.y, to_geo.loc.y, to_geo.size.h)
++                && !in_range(new_pos.y, from_geo.loc.y, from_geo.size.h)
++            {
++                // Crossed a horizontal edge: keep the physical horizontal position.
++                remapped.x = remap(
++                    new_pos.x,
++                    from_geo.loc.x,
++                    from_geo.size.w,
++                    to_geo.loc.x,
++                    to_geo.size.w,
++                    from_mm.0 / to_mm.0,
++                );
++            } else {
++                continue;
++            }
++
++            if to_geo.contains(remapped) {
++                return remapped;
++            }
++        }
++
++        new_pos
++    }
++
+     fn is_inside_hot_corner(&self, output: &Output, pos: Point<f64, Logical>) -> bool {
+         let config = self.config.borrow();
+         let hot_corners = output
