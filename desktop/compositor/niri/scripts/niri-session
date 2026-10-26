@@ -36,7 +36,11 @@ RESTORE_CMDS = {
     "nvim", "vim", "vi", "nano", "hx", "htop", "btop", "top", "nvtop", "bat", "less",
     "man", "yazi", "ranger", "lf", "mc", "lazygit", "tig", "claude",
 }
-IGNORE_APP_IDS = {"xdg-desktop-portal-gtk", "xdg-desktop-portal-gnome"}
+# Dialogs that belong to whoever asked for them; reopening them on their own makes no sense.
+IGNORE_APP_IDS = {
+    "xdg-desktop-portal-gtk", "xdg-desktop-portal-gnome", "gcr-prompter",
+    "polkit-mate-authentication-agent-1",
+}
 # X11 windows all belong to xwayland-satellite, so their pid says nothing about the app.
 PROXY_PROCS = {"xwayland-satellite"}
 
