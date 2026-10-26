@@ -5,7 +5,7 @@ binds {
     Mod+D { spawn "rofi" "-show" "drun"; }
 
     // Session
-    Mod+Ctrl+Escape { quit; }
+    Mod+Ctrl+Escape { spawn-sh "niri-session save; niri msg action quit"; }
     Mod+Q { close-window; }
 
     // Screenshot
