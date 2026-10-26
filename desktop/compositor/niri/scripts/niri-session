@@ -1,0 +1,531 @@
+#!/usr/bin/env python3
+# located in ~/.local/bin/niri-session
+#
+# Saves the window layout on exit and restores it on startup:
+#   niri-session save     -- dump windows (app, monitor, workspace, column, width)
+#   niri-session restore  -- launch everything in parallel and put windows back
+#   niri-session daemon   -- restore, then keep the saved layout up to date on every change
+#
+# The daemon writes the file atomically and fsyncs it, so a power cut leaves either the
+# previous or the new layout on disk, never a broken one.
+#
+# Apps restore their own contents (chats, tabs, projects). Terminals are reopened in the
+# same directory and rerun the foreground program if it's in RESTORE_CMDS.
+
+import json
+import os
+import re
+import select
+import shlex
+import subprocess
+import sys
+import time
+from collections import defaultdict, deque
+from pathlib import Path
+
+STATE_FILE = (
+    Path(os.environ.get("XDG_STATE_HOME", Path.home() / ".local/state"))
+    / "niri-session/session.json"
+)
+LAYOUT_KDL = Path.home() / ".config/niri/layout.kdl"
+
+TERMINALS = {"kitty"}
+SHELLS = {"zsh", "bash", "fish", "sh"}
+# Foreground programs that are safe to rerun in a restored terminal.
+RESTORE_CMDS = {
+    "nvim", "vim", "vi", "nano", "hx", "htop", "btop", "top", "nvtop", "bat", "less",
+    "man", "yazi", "ranger", "lf", "mc", "lazygit", "tig", "claude",
+}
+IGNORE_APP_IDS = {"xdg-desktop-portal-gtk", "xdg-desktop-portal-gnome"}
+# X11 windows all belong to xwayland-satellite, so their pid says nothing about the app.
+PROXY_PROCS = {"xwayland-satellite"}
+
+RESTORE_TIMEOUT = 60
+# Save this long after the last change, so bursts of events end up in a single write.
+SAVE_DEBOUNCE = 2
+# Terminal directories don't produce events, so save every so often anyway.
+SAVE_INTERVAL = 60
+# Shutdown closes many windows at once; don't let that overwrite the layout. If niri is
+# still alive after the delay, the closing was deliberate and gets saved.
+MASS_CLOSE_COUNT = 3
+MASS_CLOSE_DELAY = 10
+WATCHED_EVENTS = {
+    "WindowsChanged", "WindowOpenedOrChanged", "WindowClosed", "WindowLayoutsChanged",
+    "WindowFocusChanged", "WorkspacesChanged",
+}
+
+
+def niri_json(*args):
+    out = subprocess.run(["niri", "msg", "-j", *args], capture_output=True, check=True)
+    return json.loads(out.stdout)
+
+
+def action(*args):
+    subprocess.run(["niri", "msg", "action", *args], capture_output=True)
+
+
+class EventStream:
+    def __init__(self):
+        self.proc = subprocess.Popen(["niri", "msg", "-j", "event-stream"],
+                                     stdout=subprocess.PIPE)
+        self.fd = self.proc.stdout.fileno()
+        self.buf = b""
+
+    def next(self, timeout):
+        """Returns the next event, or None on timeout. Raises EOFError when niri is gone."""
+        deadline = time.monotonic() + max(timeout, 0)
+        while b"\n" not in self.buf:
+            ready, _, _ = select.select([self.fd], [], [], max(deadline - time.monotonic(), 0))
+            if not ready:
+                return None
+            chunk = os.read(self.fd, 65536)
+            if not chunk:
+                raise EOFError
+            self.buf += chunk
+        line, self.buf = self.buf.split(b"\n", 1)
+        return json.loads(line) if line.strip() else self.next(deadline - time.monotonic())
+
+    def close(self):
+        self.proc.terminate()
+
+
+def read_layout():
+    """Returns gaps and the column width proportions (in %) from layout.kdl."""
+    try:
+        text = LAYOUT_KDL.read_text()
+    except OSError:
+        text = ""
+    m = re.search(r"^\s*gaps\s+([\d.]+)", text, re.M)
+    gaps = float(m.group(1)) if m else 16.0
+    presets = {float(p) * 100 for p in re.findall(r"proportion\s+([\d.]+)", text)}
+    return gaps, presets | {100.0}
+
+
+def snap_width(pct, presets):
+    pct = min(pct, 100.0)
+    nearest = min(presets, key=lambda p: abs(p - pct))
+    return round(nearest if abs(nearest - pct) < 1 else pct, 3)
+
+
+# --- process inspection ---
+
+
+def proc_children(pid):
+    kids = []
+    for task in Path(f"/proc/{pid}/task").glob("*"):
+        try:
+            kids += map(int, (task / "children").read_text().split())
+        except OSError:
+            pass
+    return kids
+
+
+def proc_comm(pid):
+    try:
+        return Path(f"/proc/{pid}/comm").read_text().strip()
+    except OSError:
+        return ""
+
+
+def proc_cmdline(pid):
+    try:
+        return [a for a in Path(f"/proc/{pid}/cmdline").read_bytes().decode().split("\0") if a]
+    except OSError:
+        return []
+
+
+def proc_cwd(pid):
+    try:
+        return os.readlink(f"/proc/{pid}/cwd")
+    except OSError:
+        return None
+
+
+def terminal_state(pid):
+    """Returns (cwd, foreground command or None) of the shell inside a terminal."""
+    for child in proc_children(pid):
+        if proc_comm(child) not in SHELLS:
+            continue
+
+        cwd = proc_cwd(child)
+        try:
+            tpgid = int(Path(f"/proc/{child}/stat").read_text().rsplit(")", 1)[1].split()[5])
+        except (OSError, IndexError, ValueError):
+            return cwd, None
+
+        if tpgid in (child, -1):
+            return cwd, None
+
+        cmd = proc_cmdline(tpgid)
+        if not cmd or os.path.basename(cmd[0]) not in RESTORE_CMDS:
+            return cwd, None
+        return proc_cwd(tpgid) or cwd, cmd
+    return None, None
+
+
+# --- desktop entries ---
+
+
+def desktop_dirs():
+    data_home = os.environ.get("XDG_DATA_HOME", str(Path.home() / ".local/share"))
+    data_dirs = os.environ.get("XDG_DATA_DIRS", "/usr/local/share:/usr/share").split(":")
+    return [Path(d) / "applications" for d in [data_home, *data_dirs] if d]
+
+
+def parse_desktop(path):
+    entry, in_main = {}, False
+    try:
+        lines = path.read_text(errors="replace").splitlines()
+    except OSError:
+        return entry
+    for line in lines:
+        if line.startswith("["):
+            in_main = line.strip() == "[Desktop Entry]"
+        elif in_main and "=" in line:
+            key, value = line.split("=", 1)
+            entry.setdefault(key.strip(), value.strip())
+    return entry
+
+
+def desktop_command(app_id):
+    by_wm_class = None
+    for d in desktop_dirs():
+        exact = d / f"{app_id}.desktop"
+        if exact.is_file():
+            entry = parse_desktop(exact)
+            if "Exec" in entry:
+                return exec_to_argv(entry["Exec"])
+        if by_wm_class is None and d.is_dir():
+            for f in d.glob("*.desktop"):
+                entry = parse_desktop(f)
+                if entry.get("StartupWMClass", "").lower() == app_id.lower() and "Exec" in entry:
+                    by_wm_class = exec_to_argv(entry["Exec"])
+                    break
+    return by_wm_class
+
+
+def exec_to_argv(exec_line):
+    argv = [a for a in shlex.split(exec_line) if not re.fullmatch(r"%[fFuUdDnNickvm]|@@u?", a)]
+    while argv and argv[-1] == "--":
+        argv.pop()
+    return argv
+
+
+# --- save ---
+
+
+_desktop_cache = {}
+
+
+def cached_desktop_command(app_id):
+    if app_id not in _desktop_cache:
+        _desktop_cache[app_id] = desktop_command(app_id)
+    return _desktop_cache[app_id]
+
+
+def collect():
+    gaps, presets = read_layout()
+    outputs = {name: o["logical"] for name, o in niri_json("outputs").items() if o.get("logical")}
+    workspaces = {w["id"]: w for w in niri_json("workspaces")}
+
+    saved = []
+    for win in niri_json("windows"):
+        app_id = win.get("app_id") or ""
+        ws = workspaces.get(win.get("workspace_id"))
+        if not app_id or app_id in IGNORE_APP_IDS or ws is None:
+            continue
+
+        entry = {
+            "app_id": app_id,
+            "title": win.get("title"),
+            "output": ws["output"],
+            "workspace": ws["idx"],
+            "floating": win["is_floating"],
+            "focused": win["is_focused"],
+        }
+
+        layout = win.get("layout") or {}
+        pos = layout.get("pos_in_scrolling_layout")
+        if pos and not win["is_floating"]:
+            entry["column"], entry["row"] = pos
+            out = outputs.get(ws["output"])
+            tile = layout.get("tile_size")
+            if out and tile and out["width"] > gaps:
+                entry["width"] = snap_width((tile[0] + gaps) / (out["width"] - gaps) * 100, presets)
+
+        pid = win.get("pid")
+        if app_id in TERMINALS and pid:
+            cwd, cmd = terminal_state(pid)
+            entry["cwd"], entry["cmd"] = cwd, cmd
+        else:
+            entry["exec"] = cached_desktop_command(app_id)
+            if entry["exec"] is None and pid and proc_comm(pid) not in PROXY_PROCS:
+                entry["exec"] = proc_cmdline(pid) or None
+
+        saved.append(entry)
+
+    saved.sort(key=lambda e: (e["output"], e["workspace"], e.get("column", 0), e.get("row", 0)))
+    return saved
+
+
+def write_state(entries):
+    """Atomically replaces the state file. Returns False if nothing changed."""
+    data = json.dumps(entries, indent=1, ensure_ascii=False).encode()
+    try:
+        if STATE_FILE.read_bytes() == data:
+            return False
+    except OSError:
+        pass
+
+    STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
+    tmp = STATE_FILE.with_suffix(".tmp")
+    with open(tmp, "wb") as f:
+        f.write(data)
+        f.flush()
+        os.fsync(f.fileno())
+    tmp.replace(STATE_FILE)
+    dir_fd = os.open(STATE_FILE.parent, os.O_RDONLY)
+    try:
+        os.fsync(dir_fd)
+    finally:
+        os.close(dir_fd)
+    return True
+
+
+def save():
+    entries = collect()
+    write_state(entries)
+    print(f"saved {len(entries)} windows to {STATE_FILE}")
+
+
+def watch():
+    stream = EventStream()
+    save_at = None
+    next_periodic = time.monotonic() + SAVE_INTERVAL
+    closes = deque()
+    try:
+        while True:
+            now = time.monotonic()
+            wake = min(save_at or next_periodic, next_periodic)
+            event = stream.next(wake - now)
+            now = time.monotonic()
+
+            if event is not None:
+                kind = next(iter(event), None)
+                if kind not in WATCHED_EVENTS:
+                    continue
+                if kind == "WindowClosed":
+                    closes.append(now)
+                if save_at is None:
+                    save_at = now + SAVE_DEBOUNCE
+                continue
+
+            if now >= next_periodic:
+                next_periodic = now + SAVE_INTERVAL
+                save_at = save_at or now
+
+            if save_at is None or now < save_at:
+                continue
+
+            while closes and closes[0] < now - MASS_CLOSE_DELAY:
+                closes.popleft()
+            if len(closes) >= MASS_CLOSE_COUNT and save_at < closes[-1] + MASS_CLOSE_DELAY:
+                save_at = closes[-1] + MASS_CLOSE_DELAY
+                continue
+
+            save_at = None
+            try:
+                write_state(collect())
+            except (subprocess.CalledProcessError, ValueError, OSError) as e:
+                print(f"failed to save: {e}", file=sys.stderr)
+    except EOFError:
+        # niri is gone; whatever happened right before is not a layout worth keeping.
+        pass
+    finally:
+        stream.close()
+
+
+# --- restore ---
+
+
+def spawn(argv, cwd=None):
+    try:
+        return subprocess.Popen(
+            argv,
+            cwd=cwd if cwd and os.path.isdir(cwd) else None,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            start_new_session=True,
+        ).pid
+    except OSError as e:
+        print(f"failed to launch {argv}: {e}", file=sys.stderr)
+        return None
+
+
+def terminal_argv(entry):
+    argv = [entry["app_id"]]
+    if entry.get("cwd"):
+        argv += ["--directory", entry["cwd"]]
+    if entry.get("cmd"):
+        shell = os.environ.get("SHELL", "/bin/sh")
+        argv += [shell, "-ic", f"{shlex.join(entry['cmd'])}; exec {shlex.quote(shell)}"]
+    return argv
+
+
+class Restorer:
+    def __init__(self, entries):
+        self.by_pid = {}
+        self.by_app = defaultdict(deque)
+        self.placed = defaultdict(list)  # (output, workspace) -> [(column, row)]
+        self.workspaces = defaultdict(list)  # output -> sorted restored workspace numbers
+        self.matched = {}  # window id -> entry
+        self.pending = 0
+        self.focus_target = None
+        self.entries = entries
+
+    def launch(self):
+        launched_apps = set()
+        for entry in self.entries:
+            app_id = entry["app_id"]
+            if app_id in TERMINALS:
+                pid = spawn(terminal_argv(entry), entry.get("cwd"))
+                if pid:
+                    self.by_pid[pid] = entry
+                    self.pending += 1
+                continue
+
+            # Multi-window apps (browsers, Steam) reopen their windows themselves.
+            if app_id not in launched_apps and entry.get("exec"):
+                spawn(entry["exec"])
+                launched_apps.add(app_id)
+            if app_id in launched_apps:
+                self.by_app[app_id].append(entry)
+                self.pending += 1
+
+    def match(self, win):
+        pid = win.get("pid")
+        if pid in self.by_pid:
+            return self.by_pid.pop(pid)
+        queue = self.by_app.get(win.get("app_id") or "")
+        return queue.popleft() if queue else None
+
+    def place(self, win, entry):
+        wid = str(win["id"])
+        focused = niri_json("focused-window")
+        prev_focus = focused["id"] if focused else None
+
+        output = entry["output"]
+        action("move-window-to-monitor", "--id", wid, output)
+
+        # Windows open in random order and niri can't have empty workspaces in the middle,
+        # so keep restored workspaces in their saved order by index rank.
+        realized = self.workspaces[output]
+        n = entry["workspace"]
+        if n in realized:
+            action("move-window-to-workspace", "--window-id", wid, "--focus", "false",
+                   str(realized.index(n) + 1))
+        else:
+            last = max((w["idx"] for w in niri_json("workspaces") if w["output"] == output),
+                       default=1)
+            action("move-window-to-workspace", "--window-id", wid, "--focus", "false", str(last))
+            realized.append(n)
+            realized.sort()
+            if realized.index(n) + 1 != len(realized):
+                action("focus-window", "--id", wid)
+                action("move-workspace-to-index", str(realized.index(n) + 1))
+
+        if entry["floating"]:
+            if not win.get("is_floating"):
+                action("move-window-to-floating", "--id", wid)
+        elif "column" in entry:
+            if win.get("is_floating"):
+                action("move-window-to-tiling", "--id", wid)
+
+            key = (entry["output"], entry["workspace"])
+            col, row = entry["column"], entry["row"]
+            placed = self.placed[key]
+            columns_before = len({c for c, _ in placed if c < col})
+            has_column = any(c == col for c, _ in placed)
+
+            action("focus-window", "--id", wid)
+            if row > 1 and has_column:
+                # Stack it at the bottom of its column.
+                action("move-column-to-index", str(columns_before + 2))
+                action("consume-or-expel-window-left")
+            else:
+                action("move-column-to-index", str(columns_before + 1))
+                if "width" in entry:
+                    action("set-window-width", "--id", wid, f"{entry['width']}%")
+            placed.append((col, row))
+
+        if prev_focus is not None and prev_focus != win["id"]:
+            action("focus-window", "--id", str(prev_focus))
+
+        if entry.get("focused"):
+            self.focus_target = win["id"]
+
+    def run(self):
+        if not self.entries:
+            return
+        # Subscribe before launching anything so that fast windows aren't missed.
+        stream = EventStream()
+        known = None
+        deadline = time.monotonic() + RESTORE_TIMEOUT
+        try:
+            while (known is None or self.pending) and time.monotonic() < deadline:
+                event = stream.next(deadline - time.monotonic())
+                if event is None:
+                    break
+
+                if "WindowsChanged" in event:
+                    first = known is None
+                    known = {w["id"] for w in event["WindowsChanged"]["windows"]}
+                    if first:
+                        self.launch()
+                elif "WindowOpenedOrChanged" in event and known is not None:
+                    win = event["WindowOpenedOrChanged"]["window"]
+                    if win["id"] in known or win["id"] in self.matched or not win.get("app_id"):
+                        continue
+                    entry = self.match(win)
+                    if entry is None:
+                        known.add(win["id"])
+                        continue
+                    self.matched[win["id"]] = entry
+                    self.pending -= 1
+                    self.place(win, entry)
+                elif "WindowClosed" in event:
+                    # Splash and updater windows close quickly; give their slot to the next one.
+                    entry = self.matched.pop(event["WindowClosed"]["id"], None)
+                    if entry is not None and entry["app_id"] not in TERMINALS:
+                        self.by_app[entry["app_id"]].appendleft(entry)
+                        self.pending += 1
+        except EOFError:
+            pass
+        finally:
+            stream.close()
+
+        if self.focus_target is not None:
+            action("focus-window", "--id", str(self.focus_target))
+
+
+def restore():
+    try:
+        entries = json.loads(STATE_FILE.read_text())
+    except (OSError, ValueError):
+        return
+    Restorer(entries).run()
+
+
+if __name__ == "__main__":
+    cmd = sys.argv[1] if len(sys.argv) > 1 else ""
+    if cmd == "save":
+        save()
+    elif cmd == "restore":
+        restore()
+    elif cmd == "daemon":
+        restore()
+        watch()
+    else:
+        print("usage: niri-session save|restore|daemon", file=sys.stderr)
+        sys.exit(2)
