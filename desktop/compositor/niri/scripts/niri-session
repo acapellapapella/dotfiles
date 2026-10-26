@@ -41,6 +41,9 @@ IGNORE_APP_IDS = {"xdg-desktop-portal-gtk", "xdg-desktop-portal-gnome"}
 PROXY_PROCS = {"xwayland-satellite"}
 
 RESTORE_TIMEOUT = 60
+# Windows are placed in one go once everything has opened, or after this long without a new
+# one. Placing moves focus around, and a window opening in the middle would steal it.
+RESTORE_SETTLE = 3
 # Save this long after the last change, so bursts of events end up in a single write.
 SAVE_DEBOUNCE = 2
 # Terminal directories don't produce events, so save every so often anyway.
@@ -62,6 +65,20 @@ def niri_json(*args):
 
 def action(*args):
     subprocess.run(["niri", "msg", "action", *args], capture_output=True)
+
+
+def focus(wid):
+    """Focuses a window and checks that it stuck, since a newly opened one can take focus."""
+    for _ in range(3):
+        action("focus-window", "--id", wid)
+        focused = niri_json("focused-window")
+        if focused and str(focused["id"]) == wid:
+            return True
+    return False
+
+
+def window_workspace(wid):
+    return next((w["workspace_id"] for w in niri_json("windows") if str(w["id"]) == wid), None)
 
 
 class EventStream:
@@ -378,8 +395,9 @@ class Restorer:
         self.by_pid = {}
         self.by_app = defaultdict(deque)
         self.placed = defaultdict(list)  # (output, workspace) -> [(column, row)]
-        self.workspaces = defaultdict(list)  # output -> sorted restored workspace numbers
+        self.ws_ids = {}  # (output, workspace) -> niri workspace id
         self.matched = {}  # window id -> entry
+        self.waiting = []  # windows matched but not placed yet
         self.pending = 0
         self.focus_target = None
         self.entries = entries
@@ -412,28 +430,26 @@ class Restorer:
 
     def place(self, win, entry):
         wid = str(win["id"])
-        focused = niri_json("focused-window")
-        prev_focus = focused["id"] if focused else None
-
-        output = entry["output"]
+        output, n = entry["output"], entry["workspace"]
+        key = (output, n)
         action("move-window-to-monitor", "--id", wid, output)
 
-        # Windows open in random order and niri can't have empty workspaces in the middle,
-        # so keep restored workspaces in their saved order by index rank.
-        realized = self.workspaces[output]
-        n = entry["workspace"]
-        if n in realized:
+        workspaces = [w for w in niri_json("workspaces") if w["output"] == output]
+        target = next((w for w in workspaces if w["id"] == self.ws_ids.get(key)), None)
+        if target is not None:
             action("move-window-to-workspace", "--window-id", wid, "--focus", "false",
-                   str(realized.index(n) + 1))
+                   str(target["idx"]))
         else:
-            last = max((w["idx"] for w in niri_json("workspaces") if w["output"] == output),
-                       default=1)
+            # Start a new workspace in the empty one at the end, then put it in its saved
+            # order among the restored ones (niri can't have empty workspaces in the middle).
+            last = max((w["idx"] for w in workspaces), default=1)
             action("move-window-to-workspace", "--window-id", wid, "--focus", "false", str(last))
-            realized.append(n)
-            realized.sort()
-            if realized.index(n) + 1 != len(realized):
-                action("focus-window", "--id", wid)
-                action("move-workspace-to-index", str(realized.index(n) + 1))
+            self.ws_ids[key] = window_workspace(wid)
+            existing = {w["id"] for w in workspaces}
+            rank = 1 + sum(1 for (o, m), ws in self.ws_ids.items()
+                           if o == output and m < n and ws in existing)
+            if rank != last and focus(wid):
+                action("move-workspace-to-index", str(rank))
 
         if entry["floating"]:
             if not win.get("is_floating"):
@@ -442,28 +458,35 @@ class Restorer:
             if win.get("is_floating"):
                 action("move-window-to-tiling", "--id", wid)
 
-            key = (entry["output"], entry["workspace"])
             col, row = entry["column"], entry["row"]
             placed = self.placed[key]
             columns_before = len({c for c, _ in placed if c < col})
             has_column = any(c == col for c, _ in placed)
 
-            action("focus-window", "--id", wid)
-            if row > 1 and has_column:
-                # Stack it at the bottom of its column.
-                action("move-column-to-index", str(columns_before + 2))
-                action("consume-or-expel-window-left")
-            else:
-                action("move-column-to-index", str(columns_before + 1))
-                if "width" in entry:
-                    action("set-window-width", "--id", wid, f"{entry['width']}%")
+            if focus(wid):
+                if row > 1 and has_column:
+                    # Stack it at the bottom of its column.
+                    action("move-column-to-index", str(columns_before + 2))
+                    action("consume-or-expel-window-left", "--id", wid)
+                else:
+                    action("move-column-to-index", str(columns_before + 1))
+            if "width" in entry and not (row > 1 and has_column):
+                action("set-window-width", "--id", wid, f"{entry['width']}%")
             placed.append((col, row))
-
-        if prev_focus is not None and prev_focus != win["id"]:
-            action("focus-window", "--id", str(prev_focus))
 
         if entry.get("focused"):
             self.focus_target = win["id"]
+
+    def place_waiting(self):
+        focused = niri_json("focused-window")
+        prev_focus = focused["id"] if focused else None
+        order = {id(e): i for i, e in enumerate(self.entries)}
+        for win, entry in sorted(self.waiting, key=lambda we: order[id(we[1])]):
+            if self.matched.get(win["id"]) is entry:
+                self.place(win, entry)
+        self.waiting.clear()
+        if prev_focus is not None:
+            action("focus-window", "--id", str(prev_focus))
 
     def run(self):
         if not self.entries:
@@ -472,17 +495,25 @@ class Restorer:
         stream = EventStream()
         known = None
         deadline = time.monotonic() + RESTORE_TIMEOUT
+        settle_at = None
         try:
-            while (known is None or self.pending) and time.monotonic() < deadline:
-                event = stream.next(deadline - time.monotonic())
+            while (known is None or self.pending or self.waiting) and time.monotonic() < deadline:
+                now = time.monotonic()
+                if self.waiting and (not self.pending or now >= settle_at):
+                    self.place_waiting()
+                    continue
+
+                wake = min(deadline, settle_at) if settle_at and self.waiting else deadline
+                event = stream.next(wake - now)
                 if event is None:
-                    break
+                    continue
 
                 if "WindowsChanged" in event:
                     first = known is None
                     known = {w["id"] for w in event["WindowsChanged"]["windows"]}
                     if first:
                         self.launch()
+                        settle_at = time.monotonic() + RESTORE_SETTLE
                 elif "WindowOpenedOrChanged" in event and known is not None:
                     win = event["WindowOpenedOrChanged"]["window"]
                     if win["id"] in known or win["id"] in self.matched or not win.get("app_id"):
@@ -493,13 +524,16 @@ class Restorer:
                         continue
                     self.matched[win["id"]] = entry
                     self.pending -= 1
-                    self.place(win, entry)
+                    self.waiting.append((win, entry))
+                    settle_at = time.monotonic() + RESTORE_SETTLE
                 elif "WindowClosed" in event:
                     # Splash and updater windows close quickly; give their slot to the next one.
                     entry = self.matched.pop(event["WindowClosed"]["id"], None)
                     if entry is not None and entry["app_id"] not in TERMINALS:
                         self.by_app[entry["app_id"]].appendleft(entry)
                         self.pending += 1
+            if self.waiting:
+                self.place_waiting()
         except EOFError:
             pass
         finally:
