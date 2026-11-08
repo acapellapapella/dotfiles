@@ -1,186 +1,158 @@
+/* midve bar — plum & lilac, sampled from the wallpaper.
+   base #0f0b10 · text #ece0ee · muted #8a7a88 · lilac #dcc3e4 · wine #c46a80
+   Glyph colours live in config.jsonc (Pango markup); this file does the
+   surface, spacing and states. */
+
+@define-color glass    rgba(18, 13, 18, 0.70);
+@define-color edge     rgba(236, 224, 238, 0.10);
+@define-color hover    rgba(236, 224, 238, 0.08);
+@define-color text     #ece0ee;
+@define-color muted    #8a7a88;
+@define-color lilac    #dcc3e4;
+@define-color wine     #c46a80;
+
 * {
-  font-family: "Noto Sans", "Ubuntu", sans-serif;
-  font-size: 11px;
+  font-family: "Onest", "Inter", "Noto Sans", sans-serif;
+  font-size: 11.5px;
   font-weight: 500;
+  font-feature-settings: "tnum";
   border: none;
   border-radius: 0;
   min-height: 0;
 }
 
 window#waybar {
-  background-color: alpha(#06060a, 0.94);
-  color: #505060;
-  border-bottom: 1px solid #10101a;
-  min-height: 0;
-  padding: 0 4px;
-}
-
-.modules-left,
-.modules-center,
-.modules-right {
-  margin: 0;
-  padding: 0;
+  background-color: @glass;
+  color: @text;
+  border-bottom: 1px solid @edge;
 }
 
 tooltip {
-  background-color: #2a2a3e;
-  border: 1px solid #2a2a3e;
-  color: #a0a0b8;
-  border-radius: 8px;
-  padding: 6px 14px;
+  background-color: rgba(26, 20, 25, 0.96);
+  border: 1px solid @edge;
+  border-radius: 10px;
 }
 
-#pulseaudio,
-#wireplumber,
-#network,
+tooltip label {
+  color: @text;
+  font-weight: 500;
+  padding: 4px 6px;
+}
+
+.modules-left  { margin-left: 4px; }
+.modules-right { margin-right: 4px; }
+
+/* ── Items: plain text on the glass; a soft wash only on hover ─────────── */
+
+#clock,
+#custom-spotify,
 #memory,
+#pulseaudio,
+#network,
 #bluetooth,
 #language,
-#tray,
-#clock {
-  background-color: #1e1e30;
-  border: 1px solid #1e1e30;
-  color: #d8d8f0;
-  border-radius: 6px;
+#custom-ai,
+#tray {
+  color: @text;
+  padding: 0 9px;
+  margin: 3px 1px;
+  border-radius: 8px;
+  transition: background-color 180ms ease, color 180ms ease;
+}
+
+#clock:hover,
+#pulseaudio:hover,
+#network:hover,
+#bluetooth:hover,
+#language:hover,
+#custom-ai:hover {
+  background-color: @hover;
 }
 
 #clock {
-  padding: 0 14px;
-  margin: 3px 4px 3px 2px;
-  font-size: 12px;
+  padding: 0 10px;
+}
+
+/* Fixed widths: values changing length (9% -> 21%) don't shift the bar. */
+#memory     { min-width: 58px; }
+#pulseaudio { min-width: 62px; }
+
+#custom-spotify {
+  color: @muted;
+  font-weight: 500;
+  margin-left: 2px;
+}
+
+#language {
+  color: @lilac;
+  font-size: 10.5px;
   font-weight: 700;
 }
 
-#clock:hover {
-  background-color: #18182a;
-  color: #ffffff;
-}
-
-#window {
-  color: #2a2a38;
-  padding: 0 10px;
-  font-size: 10px;
-  font-weight: 400;
-}
-
-#workspaces {
-  margin: 0 4px;
-  padding: 0 4px;
-  background-color: transparent;
-  border: none;
-}
-
-#workspaces button,
-#workspaces button:hover,
-#workspaces button.active,
-#workspaces button.urgent {
-  margin: 6px 2px;
-  min-width: 0;
-  min-height: 0;
-  border: none;
-  font-size: 0;
-  color: transparent;
-}
-
-#workspaces button {
+#custom-ai {
+  color: @muted;
+  font-size: 13px;
   padding: 0 8px;
-  border-radius: 50%;
-  background-color: #2a2a3e;
-  transition: background-color 0.2s ease;
 }
 
-#workspaces button:hover {
-  padding: 0 8px;
-  border-radius: 50%;
-}
-
-#workspaces button.active {
-  animation: droplet 0.4s ease forwards;
-  padding: 0 8px;
-  border: none;
-  font-size: 0;
-  color: transparent;
-}
-
-#workspaces button.urgent {
-  background-color: #c8a0a8;
-  padding: 0 8px;
-  border-radius: 50%;
-}
-
-#pulseaudio,
-#wireplumber,
-#network,
-#memory,
-#bluetooth,
-#language {
-  padding: 0 10px;
-  margin: 3px 2px;
-  font-weight: 600;
-  font-size: 11px;
-}
-
-#pulseaudio:hover,
-#wireplumber:hover,
-#network:hover,
-#memory:hover,
-#clock:hover,
-#tray:hover,
-#bluetooth:hover {
-  background-color: #18182a;
-  color: #ffffff;
+#custom-ai:hover {
+  color: @lilac;
 }
 
 #pulseaudio.muted,
-#wireplumber.muted,
-#network.disconnected,
-#bluetooth.disabled {
-  background-color: #1e1e30;
-  border: 1px solid #1e1e30;
-  color: #d8d8f0;
-}
-
-#language {
-  font-size: 9px;
-  font-weight: 800;
-  padding: 0 8px;
-}
-
-#tray {
-  padding: 0 10px;
-  margin: 3px 2px;
-}
-
-#tray > .passive {
-  -gtk-icon-effect: dim;
+#network.disconnected {
+  color: @wine;
 }
 
 #tray > .needs-attention {
   -gtk-icon-effect: highlight;
 }
 
-#custom-separator {
-  color: #2a2a3e;
+/* ── Workspaces: dots; occupied ones a little brighter than empty ones, the
+   active one stretches into a lilac capsule ─────────────────────────────── */
+
+#workspaces button {
+  min-width: 7px;
+  min-height: 7px;
   padding: 0;
-  margin: 0;
-  background-color: transparent;
+  margin: 9px 3px;
   border: none;
+  border-radius: 99px;
+  box-shadow: none;
+  background-image: none;
+  outline: none;
+  background-color: rgba(236, 224, 238, 0.30);
+  font-size: 1px;
+  color: transparent;
+  transition: min-width 280ms cubic-bezier(0.2, 0.9, 0.25, 1),
+              background-color 200ms ease;
 }
 
-@keyframes droplet {
-  0% {
-    background-color: #2a2a3e;
-    border-radius: 50%;
-    box-shadow: none;
-  }
-  60% {
-    background-color: #2a2a3e;
-    border-radius: 10px;
-    box-shadow: none;
-  }
-  100% {
-    background-color: #1e1e30;
-    border-radius: 8px;
-    box-shadow: 0 0 0 1.5px rgba(180, 175, 255, 0.7);
-  }
+/* `*` gives every label a full-size font; an (empty) label line that tall
+   would stretch the dots and the whole bar. */
+#workspaces button label {
+  font-size: 1px;
+  min-height: 0;
+  min-width: 0;
+  padding: 0;
+  margin: 0;
+}
+
+#workspaces button.empty {
+  background-color: rgba(236, 224, 238, 0.13);
+}
+
+#workspaces button:hover {
+  background-color: @muted;
+  box-shadow: none;
+  text-shadow: none;
+}
+
+#workspaces button.active {
+  min-width: 20px;
+  background-color: @lilac;
+}
+
+#workspaces button.urgent {
+  background-color: @wine;
 }
