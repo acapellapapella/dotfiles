@@ -1,0 +1,50 @@
+@import url("plain-widgets.css");
+
+/* libadwaita (GTK4) apps in the desktop palette: plum & lilac from the
+   wallpaper (see waybar-niri/style.css). Variables for libadwaita >= 1.6,
+   named colors for older apps. */
+
+:root {
+  --accent-bg-color: #8e6a9a;
+  --accent-fg-color: #ffffff;
+  --accent-color: #dcc3e4;
+  --destructive-bg-color: #a8566a;
+  --destructive-color: #e08a9e;
+
+  --window-bg-color: #161116;
+  --window-fg-color: #ece0ee;
+  --view-bg-color: #110d11;
+  --view-fg-color: #ece0ee;
+  --headerbar-bg-color: #1c161b;
+  --headerbar-fg-color: #ece0ee;
+  --headerbar-backdrop-color: #161116;
+  --sidebar-bg-color: #1a1419;
+  --sidebar-fg-color: #ece0ee;
+  --sidebar-backdrop-color: #161116;
+  --secondary-sidebar-bg-color: #161116;
+  --card-bg-color: rgba(236, 224, 238, 0.05);
+  --popover-bg-color: #221b21;
+  --popover-fg-color: #ece0ee;
+  --dialog-bg-color: #1c161b;
+  --dialog-fg-color: #ece0ee;
+}
+
+@define-color accent_bg_color #8e6a9a;
+@define-color accent_fg_color #ffffff;
+@define-color accent_color #dcc3e4;
+@define-color destructive_bg_color #a8566a;
+@define-color destructive_color #e08a9e;
+@define-color window_bg_color #161116;
+@define-color window_fg_color #ece0ee;
+@define-color view_bg_color #110d11;
+@define-color view_fg_color #ece0ee;
+@define-color headerbar_bg_color #1c161b;
+@define-color headerbar_fg_color #ece0ee;
+@define-color headerbar_backdrop_color #161116;
+@define-color sidebar_bg_color #1a1419;
+@define-color sidebar_fg_color #ece0ee;
+@define-color sidebar_backdrop_color #161116;
+@define-color popover_bg_color #221b21;
+@define-color popover_fg_color #ece0ee;
+@define-color dialog_bg_color #1c161b;
+@define-color dialog_fg_color #ece0ee;
