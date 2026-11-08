@@ -1,5 +1,6 @@
+// Launcher: radius matches the rofi theme's window border-radius (22px).
 layer-rule {
-    match namespace="rofi"
+    match namespace="^rofi$"
     shadow {
         on
         softness 5
@@ -7,11 +8,24 @@ layer-rule {
         offset x=0 y=8
         color "#00000066"
     }
-    geometry-corner-radius 24
+    geometry-corner-radius 22
     background-effect {
         xray false
         blur true
         noise 0.02
         saturation 1.4
     }
+}
+
+// Notifications: same soft shadow, radius matches mako's border-radius (12px).
+layer-rule {
+    match namespace="^notifications$"
+    shadow {
+        on
+        softness 12
+        spread 0
+        offset x=0 y=4
+        color "#00000066"
+    }
+    geometry-corner-radius 12
 }
