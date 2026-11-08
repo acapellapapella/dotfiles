@@ -17,23 +17,35 @@ layout {
         off
     }
 
+    // Palette: plum & lilac from the wallpaper (see waybar-niri/style.css).
     border {
         on
         width 1
-        active-gradient from="#c8c8e0" to="#484860" angle=45
-        inactive-color "#ffffff0f"
-        urgent-color "#786878"
+        active-gradient from="#ecd9f0" to="#7d6679" angle=45
+        inactive-color "#ecd9f010"
+        urgent-color "#c46a80"
     }
 
+    // A soft, slightly lowered shadow reads as depth rather than a dark halo.
     shadow {
         on
-        softness 25
-        spread 4
-        offset x=0 y=0
-        color "#00000099"
+        softness 28
+        spread 2
+        offset x=0 y=6
+        color "#0b060a8c"
+        inactive-color "#0b060a59"
     }
 }
 
+// Overview: workspaces float over deep plum, each with the same lowered shadow
+// as windows.
 overview {
     zoom 0.50
+    backdrop-color "#0b070a"
+    workspace-shadow {
+        softness 40
+        spread 6
+        offset x=0 y=12
+        color "#0b060a99"
+    }
 }

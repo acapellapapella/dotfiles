@@ -1,31 +1,44 @@
+// Bar: translucent along the top edge; the wallpaper shows through blurred.
+layer-rule {
+    match namespace="^waybar$"
+    background-effect {
+        xray false
+        blur true
+    }
+}
+
 // Launcher: radius matches the rofi theme's window border-radius (22px).
 layer-rule {
     match namespace="^rofi$"
     shadow {
         on
-        softness 5
+        softness 18
         spread 0
-        offset x=0 y=8
-        color "#00000066"
+        offset x=0 y=10
+        color "#0b060a80"
     }
     geometry-corner-radius 22
     background-effect {
         xray false
         blur true
         noise 0.02
-        saturation 1.4
+        saturation 1.2
     }
 }
 
-// Notifications: same soft shadow, radius matches mako's border-radius (12px).
+// Notifications: radius matches mako's border-radius (12px).
 layer-rule {
     match namespace="^notifications$"
     shadow {
         on
-        softness 12
+        softness 14
         spread 0
-        offset x=0 y=4
-        color "#00000066"
+        offset x=0 y=5
+        color "#0b060a73"
     }
     geometry-corner-radius 12
+    background-effect {
+        xray false
+        blur true
+    }
 }
