@@ -1,18 +1,29 @@
+# Palette shared with waybar / niri / kitty: near-black surfaces,
+# #d8d8f0 text, #2a2a3e hairlines, #786878 for urgent.
+font=Noto Sans 10
+width=340
+padding=12,14
+margin=10
+outer-margin=6
+border-size=1
+border-radius=12
+max-icon-size=32
+icon-location=left
+
+background-color=#0e0e18f2
+text-color=#d8d8f0
+border-color=#2a2a3e
+progress-color=over #2a2a3e
+
+format=<b>%s</b>\n%b
 default-timeout=4500
 max-visible=5
-
-font=JetBrains Mono 10
-
-background-color=#1e1e2e
-text-color=#cdd6f4
-border-color=#1E213D
-
-width=300
-padding=12
-margin=10
-
-border-size=2
-border-radius=12
-
 anchor=top-right
 layer=top
+
+[urgency=low]
+text-color=#a0a0b8
+
+[urgency=critical]
+border-color=#786878
+default-timeout=0
