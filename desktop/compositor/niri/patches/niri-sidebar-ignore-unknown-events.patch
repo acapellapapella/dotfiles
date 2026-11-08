@@ -1,0 +1,12 @@
+--- a/src/commands/listen.rs
++++ b/src/commands/listen.rs
+@@ -19,6 +19,9 @@
+     loop {
+         let event = match read_event() {
+             Ok(e) => e,
++            // An event this build doesn't know (a newer niri): skip it. The
++            // line is already consumed; EOF and I/O errors still end the loop.
++            Err(e) if e.kind() == std::io::ErrorKind::InvalidData => continue,
+             Err(e) => {
+                 eprintln!("niri-sidebar: IPC error: {}", e);
+                 anyhow::bail!("Fatal IPC error: {}", e);
