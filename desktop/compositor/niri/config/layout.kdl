@@ -11,11 +11,10 @@ layout {
 
     default-column-width { proportion 0.45; }
 
+    // Focus is shown by the border alone: a second outline (focus ring)
+    // around it only doubled the edge.
     focus-ring {
-        on
-        width 1
-        active-color "#3a3a5a"
-        inactive-color "#ffffff05"
+        off
     }
 
     border {
@@ -33,11 +32,8 @@ layout {
         offset x=0 y=0
         color "#00000099"
     }
+}
 
-    struts {
-        left 0
-        right 0
-        top 0
-        bottom 0
-    }
+overview {
+    zoom 0.50
 }
