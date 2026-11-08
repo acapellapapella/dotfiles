@@ -1,34 +1,46 @@
-// overview
-overview {
-    zoom 0.50
-}
+// niri matches app-id/title as unanchored regexes: anchor them (^...$) so a
+// rule doesn't catch other apps whose id merely contains the same word.
 
-// windows
+// All windows
 window-rule {
     geometry-corner-radius 10
     clip-to-geometry true
 }
 
-// Kitty
+// ── Look ───────────────────────────────────────────────────────────────────
+
+// Kitty: translucency comes from kitty's own background_opacity, so the text
+// stays fully opaque; niri blurs what is behind the window.
 window-rule {
-    match app-id="kitty"
-    opacity 0.83
+    match app-id="^kitty$"
     background-effect {
         xray false
         blur true
     }
 }
 
+// ── Floating windows ───────────────────────────────────────────────────────
+
+// Password prompts and portal dialogs have no parent window, so niri would
+// otherwise tile them as a new column and shift the layout.
+window-rule {
+    match app-id="^polkit-mate-authentication-agent-1$"
+    match app-id="^gcr-prompter$"
+    match app-id=r#"^xdg-desktop-portal-(gtk|gnome)$"#
+    open-floating true
+    open-focused true
+}
+
 // Nautilus
 window-rule {
-    match app-id=r#".*Nautilus.*"#
+    match app-id=r#"^org\.gnome\.Nautilus$"#
     open-floating true
     default-column-width { fixed 1000; }
 }
 
-// Telegram Media viewer
+// Telegram media viewer
 window-rule {
-    match app-id=r#"org\.telegram\.desktop"# title="Media viewer"
+    match app-id=r#"^org\.telegram\.desktop$"# title="^Media viewer$"
     open-floating true
     default-column-width { fixed 1200; }
     default-window-height { fixed 800; }
@@ -36,64 +48,52 @@ window-rule {
 
 // pavucontrol
 window-rule {
-    match app-id="pavucontrol"
+    match app-id=r#"^(org\.pulseaudio\.)?pavucontrol$"#
     open-floating true
     default-column-width { fixed 700; }
 }
 
 // blueman
 window-rule {
-    match app-id="blueman-manager"
+    match app-id="^blueman-manager$"
     open-floating true
     default-column-width { fixed 600; }
 }
 
-// maximized
+// ── Open maximized ─────────────────────────────────────────────────────────
 
-
-// Telegram
 window-rule {
-    match app-id=r#".*telegram.*"#
-    open-maximized true
-}
-
-// Firefox
-window-rule {
-    match app-id=r#".*firefox.*"#
-    open-maximized true
-}
-
-// Helium
-window-rule {
-    match app-id=r#"^helium$"#
-    open-maximized true
-}
-
-// Discord
-window-rule {
-    match app-id=r#"^discord$"#
-    open-maximized true
-}
-
-// Zed
-window-rule {
+    match app-id=r#"^org\.telegram\.desktop$"#
+    match app-id=r#"firefox"#
+    match app-id="^helium$"
+    match app-id="^discord$"
     match app-id=r#"^dev\.zed\.Zed$"#
+    match app-id=r#"^(spotify|Spotify|com\.spotify\.Client)$"#
+    match app-id="^steam$"
+    match app-id=r#"^(code|code-oss|codium|Code|VSCodium)(-url-handler)?$"#
     open-maximized true
 }
 
-// Spotify
+// ── Games ──────────────────────────────────────────────────────────────────
+
+// VRR on DP-1 (on-demand) while a game is on screen.
 window-rule {
-    match app-id=r#".*spotify.*"#
-    open-maximized true
+    match app-id=r#"^steam_app_"#
+    match app-id=r#"^gamescope$"#
+    match app-id=r#"^Terraria\.bin\.x86_64$"#
+    match app-id=r#"^com\.mojang\.minecraft$"#
+    variable-refresh-rate true
 }
 
+// Terraria
 window-rule {
-    match app-id="steam"
-    open-maximized true
+    match app-id=r#"^Terraria\.bin\.x86_64$"#
+    open-floating true
+    open-fullscreen true
 }
 
-// VS Code, etc
+// Minecraft: always open on the main 165 Hz monitor
 window-rule {
-    match app-id=r#".*code.*"#
-    open-maximized true
+    match app-id=r#"^com\.mojang\.minecraft$"#
+    open-on-output "DP-1"
 }
