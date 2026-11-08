@@ -45,5 +45,25 @@ link desktop/config/mako/config              "$cfg/mako/config"
 link desktop/config/rofi/config.rasi         "$cfg/rofi/config.rasi"
 link desktop/config/rofi/themes/midve.rasi   "$cfg/rofi/themes/midve.rasi"
 link desktop/config/swaylock/config          "$cfg/swaylock/config"
+link desktop/config/gtk/gtk-3.0/settings.ini "$cfg/gtk-3.0/settings.ini"
+link desktop/config/gtk/gtk-4.0/settings.ini "$cfg/gtk-4.0/settings.ini"
+link desktop/config/gtk/gtk-4.0/gtk.css      "$cfg/gtk-4.0/gtk.css"
+link desktop/config/gtk/gtk-3.0/gtk.css      "$cfg/gtk-3.0/gtk.css"
+link desktop/config/gtk/plain-widgets.css    "$cfg/gtk-3.0/plain-widgets.css"
+link desktop/config/gtk/plain-widgets.css    "$cfg/gtk-4.0/plain-widgets.css"
 link kitty/kitty.conf                        "$cfg/kitty/kitty.conf"
 link shells/zsh/.zprofile                    "$HOME/.zprofile"
+
+# Icon theme: Papirus-Dark with violet folders (built in ~/.local/share/icons).
+python3 -I "$repo/desktop/config/gtk/papirus-plum.py"
+
+# Cursor: the midve theme, drawn and built by the script (~/.local/share/icons/midve).
+python3 -I "$repo/desktop/config/cursor/midve-cursor.py"
+
+# UI font: Onest (OFL, Google Fonts), installed per user.
+if ! fc-list : family | grep -qx 'Onest'; then
+    mkdir -p "$HOME/.local/share/fonts/Onest"
+    curl -fsSL -o "$HOME/.local/share/fonts/Onest/Onest-Variable.ttf" \
+        "https://github.com/google/fonts/raw/main/ofl/onest/Onest%5Bwght%5D.ttf" &&
+    fc-cache -f "$HOME/.local/share/fonts" >/dev/null && echo "installed font Onest"
+fi
