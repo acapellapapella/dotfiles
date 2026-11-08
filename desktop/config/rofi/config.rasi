@@ -1,11 +1,12 @@
 configuration {
     modi:                   "drun";
-    icon-theme:             "Papirus-Dark";
+    icon-theme:             "Papirus-Dark-Plum";
     show-icons:             true;
     terminal:               "kitty";
     location:               0;
     disable-history:        false;
     hide-scrollbar:         true;
     sidebar-mode:           false;
+    drun-display-format:    "{name}";
 }
 @theme "~/.config/rofi/themes/midve"

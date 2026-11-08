@@ -1,21 +1,22 @@
+/* Palette: plum & lilac from the wallpaper (see waybar-niri/style.css). */
 * {
-    bg: rgba(10,10,16,0.0);
-    surface: rgba(18,18,28,0.45);
-    surface-hi: rgba(28,28,44,0.75);
-    border: rgba(255,255,255,0.06);
-    border-hi: rgba(122,122,255,0.35);
-    fg: #d7d9ee;
-    fg-dim: #8b8ea8;
+    bg: rgba(15,11,16,0.0);
+    surface: rgba(236,224,238,0.06);
+    surface-hi: rgba(236,224,238,0.13);
+    border: rgba(236,224,238,0.08);
+    border-hi: rgba(220,195,228,0.45);
+    fg: #ece0ee;
+    fg-dim: #9a8a98;
     fg-hi: #ffffff;
-    accent: #7a7aff;
+    accent: #dcc3e4;
     background-color: transparent;
     text-color: @fg;
-    font: "JetBrains Mono 10";
+    font: "Onest 11";
 }
 
 window {
-    width: 820px;
-    background-color: transparent;
+    width: 880px;
+    background-color: rgba(20,15,20,0.55);
     border: 1px;
     border-color: @border;
     border-radius: 22px;
@@ -48,7 +49,7 @@ inputbar {
 }
 
 entry {
-    background-color: rgba(20,20,32,0.60);
+    background-color: rgba(236,224,238,0.07);
     text-color: @fg-hi;
     placeholder-color: @fg-dim;
     placeholder: "Search...";
@@ -56,7 +57,7 @@ entry {
     border-color: @border;
     border-radius: 14px;
     padding: 14px 16px;
-    font: "JetBrains Mono Medium 13";
+    font: "Onest Medium 13";
 }
 
 listview {
@@ -104,7 +105,7 @@ element-text {
     text-color: @fg;
     horizontal-align: 0.0;
     vertical-align: 0.5;
-    font: "JetBrains Mono Medium 10";
+    font: "Onest Medium 10.5";
 }
 
 element-text selected {

@@ -1,32 +1,32 @@
 # Same wallpaper and palette as the desktop; the ring only appears while typing.
-image=/home/midv/.local/wallpapers/katya_ultra.png
+image=/home/midv/.local/wallpapers/midve-plum-wide.png
 scaling=fill
-color=06060a
+color=0f0b10
 
-font=Noto Sans
+font=Onest
 font-size=18
 indicator-radius=88
 indicator-thickness=5
 show-failed-attempts
 ignore-empty-password
 
-inside-color=0e0e18cc
-inside-clear-color=0e0e18cc
-inside-ver-color=1e1e30cc
-inside-wrong-color=1e1e30cc
+inside-color=1a1419cc
+inside-clear-color=1a1419cc
+inside-ver-color=271f26cc
+inside-wrong-color=271f26cc
 
-ring-color=2a2a3e
-ring-clear-color=484860
-ring-ver-color=c8c8e0
-ring-wrong-color=786878
+ring-color=3a2e38
+ring-clear-color=7d6679
+ring-ver-color=dcc3e4
+ring-wrong-color=c46a80
 
-key-hl-color=c8c8e0
-bs-hl-color=786878
+key-hl-color=dcc3e4
+bs-hl-color=c46a80
 
-text-color=d8d8f0
-text-clear-color=d8d8f0
-text-ver-color=d8d8f0
-text-wrong-color=d8d8f0
+text-color=ece0ee
+text-clear-color=ece0ee
+text-ver-color=ece0ee
+text-wrong-color=ece0ee
 
 line-color=00000000
 line-clear-color=00000000
