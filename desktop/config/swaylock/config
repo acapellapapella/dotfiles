@@ -1,0 +1,35 @@
+# Same wallpaper and palette as the desktop; the ring only appears while typing.
+image=/home/midv/.local/wallpapers/katya_ultra.png
+scaling=fill
+color=06060a
+
+font=Noto Sans
+font-size=18
+indicator-radius=88
+indicator-thickness=5
+show-failed-attempts
+ignore-empty-password
+
+inside-color=0e0e18cc
+inside-clear-color=0e0e18cc
+inside-ver-color=1e1e30cc
+inside-wrong-color=1e1e30cc
+
+ring-color=2a2a3e
+ring-clear-color=484860
+ring-ver-color=c8c8e0
+ring-wrong-color=786878
+
+key-hl-color=c8c8e0
+bs-hl-color=786878
+
+text-color=d8d8f0
+text-clear-color=d8d8f0
+text-ver-color=d8d8f0
+text-wrong-color=d8d8f0
+
+line-color=00000000
+line-clear-color=00000000
+line-ver-color=00000000
+line-wrong-color=00000000
+separator-color=00000000
