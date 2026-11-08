@@ -14,6 +14,7 @@ binds {
     Shift+Print { screenshot-window; }
 
     // Focus
+    Shift+Ctrl+Backslash { spawn "ffocus" "toggle"; }
     Alt+Tab { toggle-overview; }
     Mod+Tab { focus-monitor-next; }
     Mod+Ctrl+Down { focus-workspace-down; }
