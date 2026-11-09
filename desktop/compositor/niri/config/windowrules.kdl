@@ -10,11 +10,11 @@ window-rule {
 // ── Look ───────────────────────────────────────────────────────────────────
 
 // Kitty: translucency comes from kitty's own background_opacity, so the text
-// stays fully opaque; niri blurs what is behind the window.
+// stays fully opaque; niri blurs the wallpaper behind it.
 window-rule {
     match app-id="^kitty$"
     background-effect {
-        xray false
+        xray true
         blur true
     }
 }

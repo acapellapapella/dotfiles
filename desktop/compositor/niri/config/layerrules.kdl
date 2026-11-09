@@ -1,8 +1,12 @@
+// Blur everywhere uses xray: it blurs only the wallpaper, once, and reuses the
+// cached result instead of re-blurring whatever is behind each surface every
+// frame. That keeps the overview (all workspaces at once) at full frame rate.
+
 // Bar: translucent along the top edge; the wallpaper shows through blurred.
 layer-rule {
     match namespace="^waybar$"
     background-effect {
-        xray false
+        xray true
         blur true
     }
 }
@@ -19,7 +23,7 @@ layer-rule {
     }
     geometry-corner-radius 22
     background-effect {
-        xray false
+        xray true
         blur true
         noise 0.02
         saturation 1.2
@@ -38,7 +42,7 @@ layer-rule {
     }
     geometry-corner-radius 12
     background-effect {
-        xray false
+        xray true
         blur true
     }
 }
