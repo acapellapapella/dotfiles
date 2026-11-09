@@ -1,7 +1,7 @@
 /* midve bar — plum & lilac, sampled from the wallpaper.
    base #0f0b10 · text #ece0ee · muted #8a7a88 · lilac #dcc3e4 · wine #c46a80
-   Glyph colours live in config.jsonc (Pango markup); this file does the
-   surface, spacing and states. */
+   The muted label words are coloured in config.jsonc (Pango markup); this
+   file does the surface, spacing and states. */
 
 @define-color glass    rgba(18, 13, 18, 0.70);
 @define-color edge     rgba(236, 224, 238, 0.10);
@@ -49,7 +49,6 @@ tooltip label {
 #memory,
 #pulseaudio,
 #network,
-#bluetooth,
 #language,
 #custom-ai,
 #tray {
@@ -63,7 +62,6 @@ tooltip label {
 #clock:hover,
 #pulseaudio:hover,
 #network:hover,
-#bluetooth:hover,
 #language:hover,
 #custom-ai:hover {
   background-color: @hover;
@@ -74,8 +72,8 @@ tooltip label {
 }
 
 /* Fixed widths: values changing length (9% -> 21%) don't shift the bar. */
-#memory     { min-width: 58px; }
-#pulseaudio { min-width: 62px; }
+#memory     { min-width: 64px; }
+#pulseaudio { min-width: 66px; }
 
 #custom-spotify {
   color: @muted;
@@ -91,7 +89,7 @@ tooltip label {
 
 #custom-ai {
   color: @muted;
-  font-size: 13px;
+  font-weight: 600;
   padding: 0 8px;
 }
 
@@ -100,7 +98,8 @@ tooltip label {
 }
 
 #pulseaudio.muted,
-#network.disconnected {
+#network.disconnected,
+#network.linked {
   color: @wine;
 }
 

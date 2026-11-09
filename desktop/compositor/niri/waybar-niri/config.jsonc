@@ -1,5 +1,8 @@
 // midve bar: plum glass along the top edge (blur from niri, layerrules.kdl).
-// Quiet lilac glyphs, values in Inter. Palette: see style.css.
+// No icons: a quiet lowercase word names each value, and a module only shows
+// when it has something to say (network only when it's down, the track only
+// while playing, the audio device's own name when it isn't the default).
+// Palette: see style.css.
 [
   {
     "output": "DP-1",
@@ -12,15 +15,7 @@
 
     "modules-left": ["clock", "custom/spotify"],
     "modules-center": ["niri/workspaces"],
-    "modules-right": [
-      "memory",
-      "pulseaudio",
-      "network",
-      "bluetooth",
-      "niri/language",
-      "custom/ai",
-      "tray"
-    ],
+    "modules-right": ["network", "memory", "pulseaudio", "niri/language", "custom/ai", "tray"],
 
     "clock": {
       "format": "<span weight='600'>{0:%H:%M}</span>  <span foreground='#8a7a88'>{0:%a %d %b}</span>",
@@ -39,9 +34,8 @@
       // https://github.com/acapellapapella/dbus-media-track — prints an empty
       // line while paused, which hides the module.
       "exec": "~/.local/bin/dbus-media-track --service --player spotify --artist \"—\" --title",
-      "format": "<span foreground='#dcc3e4'>󰎈</span>  {}",
       "escape": true,
-      "max-length": 56,
+      "max-length": 60,
       "return-type": "plain",
       "interval": 0,
       "tooltip": false
@@ -51,43 +45,33 @@
       "format": ""
     },
 
+    "network": {
+      "format-ethernet": "",
+      "format-wifi": "",
+      "format-linked": "<span foreground='#8a7a88'>net</span>  no ip",
+      "format-disconnected": "offline",
+      "tooltip-format-disconnected": "No network connection",
+      "on-click": "kitty -e nmtui",
+      "interval": 5
+    },
+
     "memory": {
-      "format": "<span foreground='#a58fa6'>󰍛</span>  {percentage}%",
+      "format": "<span foreground='#8a7a88'>ram</span>  {percentage}%",
       "interval": 5,
       "tooltip-format": "{used:0.1f} / {total:0.1f} GiB"
     },
 
     "pulseaudio": {
-      "format": "<span foreground='#a58fa6'>󰕾</span>  {volume}%",
-      "format-bluetooth": "<span foreground='#a58fa6'>󰋋</span>  {volume}%",
-      "format-bluetooth-muted": "<span foreground='#a58fa6'>󰟎</span>  muted",
-      "format-muted": "<span foreground='#a58fa6'>󰖁</span>  muted",
+      "format": "<span foreground='#8a7a88'>vol</span>  {volume}%",
+      "format-bluetooth": "<span foreground='#8a7a88'>{desc}</span>  {volume}%",
+      "format-muted": "<span foreground='#8a7a88'>vol</span>  muted",
+      "format-bluetooth-muted": "<span foreground='#8a7a88'>{desc}</span>  muted",
       "max-volume": 150,
       "on-click": "pavucontrol",
+      "on-click-right": "blueman-manager",
       "on-scroll-up": "wpctl set-volume @DEFAULT_SINK@ 2%+ --limit 1.5",
       "on-scroll-down": "wpctl set-volume @DEFAULT_SINK@ 2%-",
-      "tooltip-format": "{desc}"
-    },
-
-    "network": {
-      "format-ethernet": "<span foreground='#a58fa6'>󰈀</span>",
-      "format-wifi": "<span foreground='#a58fa6'>󰤨</span>  {essid}",
-      "format-disconnected": "<span foreground='#a58fa6'>󰤭</span>",
-      "tooltip-format-ethernet": "{ifname}  ·  {ipaddr}",
-      "tooltip-format-wifi": "{essid}  ·  {signalStrength}%\n{ipaddr}",
-      "on-click": "kitty -e nmtui",
-      "interval": 5
-    },
-
-    "bluetooth": {
-      "format": "<span foreground='#a58fa6'>󰂯</span>",
-      "format-off": "",
-      "format-disabled": "",
-      "format-connected": "<span foreground='#a58fa6'>󰂱</span>  {device_alias}",
-      "tooltip-format": "{controller_alias}",
-      "tooltip-format-connected": "{device_enumerate}",
-      "tooltip-format-enumerate-connected": "{device_alias}",
-      "on-click": "blueman-manager"
+      "tooltip-format": "{desc}\nclick: mixer · right click: bluetooth"
     },
 
     "niri/language": {
@@ -96,9 +80,9 @@
     },
 
     "custom/ai": {
-      "format": "󰚩",
+      "format": "ai",
       "on-click": "bash -c '~/.local/bin/to_ai.sh'",
-      "tooltip": false
+      "tooltip-format": "Open ChatGPT in Helium"
     },
 
     "tray": {
