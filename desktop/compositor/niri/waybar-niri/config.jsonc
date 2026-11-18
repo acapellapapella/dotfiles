@@ -13,9 +13,18 @@
     "exclusive": true,
     "gtk-layer-shell": true,
 
-    "modules-left": ["clock", "custom/spotify"],
-    "modules-center": ["niri/workspaces"],
+    "modules-left": ["custom/ws", "clock", "custom/spotify"],
+    "modules-center": ["cffi/drops"],
     "modules-right": ["network", "memory", "pulseaudio", "niri/language", "custom/ai", "tray"],
+
+    // The active workspace's number in the corner, set apart from the clock by
+    // a hairline (scripts/niri-ws-number follows niri's event stream).
+    "custom/ws": {
+      "exec": "~/.local/bin/niri-ws-number DP-1",
+      "return-type": "json",
+      "restart-interval": 2,
+      "escape": true
+    },
 
     "clock": {
       "format": "<span weight='600'>{0:%H:%M}</span>  <span foreground='#8a7a88'>{0:%a %d %b}</span>",
@@ -41,8 +50,11 @@
       "tooltip": false
     },
 
-    "niri/workspaces": {
-      "format": ""
+    // Workspaces: dots with a drop of lilac that runs between them
+    // (drops/drops.c, built and installed by install.sh).
+    "cffi/drops": {
+      "module_path": "/home/midv/.local/lib/waybar/niri-drops.so",
+      "output": "DP-1"
     },
 
     "network": {

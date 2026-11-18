@@ -41,6 +41,7 @@ link "$niri/portals/niri-portals.conf"       "$cfg/xdg-desktop-portal/niri-porta
 link "$niri/scripts/niri-session"            "$HOME/.local/bin/niri-session"
 link "$niri/scripts/midve-lock"              "$HOME/.local/bin/midve-lock"
 link "$niri/scripts/unlock-niri"             "$HOME/.local/bin/unlock-niri"
+link "$niri/scripts/niri-ws-number"          "$HOME/.local/bin/niri-ws-number"
 link "$niri/start_niri.sh"                   "$HOME/start_niri.sh"
 
 link desktop/config/mako/config              "$cfg/mako/config"
@@ -61,6 +62,9 @@ python3 -I "$repo/desktop/config/gtk/papirus-plum.py"
 
 # Cursor: the midve theme, Bibata Modern recoloured by the script (~/.local/share/icons/midve).
 python3 -I "$repo/desktop/config/cursor/midve-cursor.py"
+
+# Waybar workspaces: the niri-drops module (~/.local/lib/waybar/niri-drops.so).
+make -s -C "$repo/$niri/waybar-niri/drops" install
 
 # UI font: Onest (OFL, Google Fonts), installed per user.
 if ! fc-list : family | grep -qx 'Onest'; then

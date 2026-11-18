@@ -71,6 +71,25 @@ tooltip label {
   padding: 0 10px;
 }
 
+/* Workspace number: the one bold lilac figure on the bar, in the left corner,
+   with a hairline between it and the clock. Muted while focus is on the other
+   monitor. */
+#custom-ws {
+  color: @lilac;
+  font-size: 13px;
+  font-weight: 700;
+  min-width: 14px;
+  padding: 0 10px 0 9px;
+  margin: 4px 4px 4px 1px;
+  border-right: 1px solid @edge;
+  border-radius: 0;
+  transition: color 180ms ease;
+}
+
+#custom-ws.idle {
+  color: @muted;
+}
+
 /* Fixed widths: values changing length (9% -> 21%) don't shift the bar. */
 #memory     { min-width: 64px; }
 #pulseaudio { min-width: 66px; }
@@ -107,51 +126,8 @@ tooltip label {
   -gtk-icon-effect: highlight;
 }
 
-/* ── Workspaces: dots; occupied ones a little brighter than empty ones, the
-   active one stretches into a lilac capsule ─────────────────────────────── */
+/* ── Workspaces: drawn by the niri-drops module (drops/drops.c) ─────────── */
 
-#workspaces button {
-  min-width: 7px;
-  min-height: 7px;
-  padding: 0;
-  margin: 9px 3px;
-  border: none;
-  border-radius: 99px;
-  box-shadow: none;
-  background-image: none;
-  outline: none;
-  background-color: rgba(236, 224, 238, 0.30);
-  font-size: 1px;
-  color: transparent;
-  transition: min-width 280ms cubic-bezier(0.2, 0.9, 0.25, 1),
-              background-color 200ms ease;
-}
-
-/* `*` gives every label a full-size font; an (empty) label line that tall
-   would stretch the dots and the whole bar. */
-#workspaces button label {
-  font-size: 1px;
-  min-height: 0;
-  min-width: 0;
-  padding: 0;
-  margin: 0;
-}
-
-#workspaces button.empty {
-  background-color: rgba(236, 224, 238, 0.13);
-}
-
-#workspaces button:hover {
-  background-color: @muted;
-  box-shadow: none;
-  text-shadow: none;
-}
-
-#workspaces button.active {
-  min-width: 20px;
-  background-color: @lilac;
-}
-
-#workspaces button.urgent {
-  background-color: @wine;
+#drops {
+  padding: 0 4px;
 }

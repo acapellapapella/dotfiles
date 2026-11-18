@@ -1,0 +1,27 @@
+#!/bin/sh
+# Waybar: the number of the active workspace on one output (default DP-1), as
+# JSON for custom/ws. It follows niri's event stream, so it changes with the
+# switch instead of polling. The tooltip says how many workspaces there are.
+#
+#   niri-ws-number [OUTPUT]
+
+out=${1:-DP-1}
+
+show() {
+    niri msg -j workspaces 2>/dev/null | jq -c --unbuffered --arg o "$out" '
+        [.[] | select(.output == $o)] as $ws
+        | ($ws | map(select(.is_active)) | first) as $a
+        | if $a == null then {text: ""} else {
+            text: ($a.name // ($a.idx | tostring)),
+            tooltip: "workspace \($a.idx) of \($ws | length)",
+            class: (if $a.is_focused then "focused" else "idle" end)
+          } end'
+}
+
+show
+# Only workspace events change the number; window and keyboard events don't.
+niri msg -j event-stream | while IFS= read -r line; do
+    case $line in
+        *'"Workspace'*) show ;;
+    esac
+done
