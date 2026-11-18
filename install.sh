@@ -57,7 +57,7 @@ link shells/zsh/.zprofile                    "$HOME/.zprofile"
 # Icon theme: Papirus-Dark with violet folders (built in ~/.local/share/icons).
 python3 -I "$repo/desktop/config/gtk/papirus-plum.py"
 
-# Cursor: the midve theme, drawn and built by the script (~/.local/share/icons/midve).
+# Cursor: the midve theme, Bibata Modern recoloured by the script (~/.local/share/icons/midve).
 python3 -I "$repo/desktop/config/cursor/midve-cursor.py"
 
 # UI font: Onest (OFL, Google Fonts), installed per user.
