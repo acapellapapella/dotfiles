@@ -30,19 +30,7 @@ layer-rule {
     }
 }
 
-// Notifications: radius matches mako's border-radius (12px).
-layer-rule {
-    match namespace="^notifications$"
-    shadow {
-        on
-        softness 14
-        spread 0
-        offset x=0 y=5
-        color "#0b060a73"
-    }
-    geometry-corner-radius 12
-    background-effect {
-        xray true
-        blur true
-    }
-}
+// Notifications: no blur or shadow here. mako draws all notifications, and
+// the gaps between them, on one surface, so niri would blur and shade one big
+// rectangle around the whole stack. mako paints its own near-opaque drops.
+

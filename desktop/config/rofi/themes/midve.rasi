@@ -1,4 +1,8 @@
-/* Palette: plum & lilac from the wallpaper (see waybar-niri/style.css). */
+/* Palette: plum & lilac from the wallpaper (see waybar-niri/style.css).
+   Drops: the search field and the selected tile are drop-shaped, round on
+   three corners and pointed at the top left (border-radius goes top-left,
+   top-right, bottom-right, bottom-left). Unselected tiles stay round, so the
+   one you land on turns into a drop. */
 * {
     bg: rgba(15,11,16,0.0);
     surface: rgba(236,224,238,0.06);
@@ -55,8 +59,8 @@ entry {
     placeholder: "Search...";
     border: 1px;
     border-color: @border;
-    border-radius: 14px;
-    padding: 14px 16px;
+    border-radius: 6px 22px 22px 22px;
+    padding: 14px 18px;
     font: "Onest Medium 13";
 }
 
@@ -75,7 +79,7 @@ element {
     background-color: @surface;
     border: 1px;
     border-color: transparent;
-    border-radius: 16px;
+    border-radius: 18px;
     orientation: horizontal;
     padding: 14px 18px;
     spacing: 14px;
@@ -88,8 +92,10 @@ element normal.normal {
 
 element selected.normal {
     background-color: @surface-hi;
+    background-image: linear-gradient(to bottom, rgba(236,224,238,0.20), rgba(196,160,212,0.10));
     border: 1px;
     border-color: @border-hi;
+    border-radius: 6px 22px 22px 22px;
     text-color: @fg-hi;
 }
 

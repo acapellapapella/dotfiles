@@ -1,16 +1,19 @@
 # Palette: plum & lilac from the wallpaper (see waybar-niri/style.css).
-# niri blurs the wallpaper behind the translucent background (layerrules.kdl).
+# Near-opaque: niri adds no blur to notifications (see layerrules.kdl).
+# Each notification is a drop: round, with the top-right corner pointed, toward
+# the corner it comes from (directional radius: top-left,top-right,bottom-right,
+# bottom-left).
 font=Onest 10
 width=340
 padding=12,14
 margin=10
 outer-margin=6
 border-size=1
-border-radius=12
+border-radius=18,5,18,18
 max-icon-size=32
 icon-location=left
 
-background-color=#1a1419d9
+background-color=#1a1419f2
 text-color=#ece0ee
 border-color=#ecd9f01f
 progress-color=over #3a2e38
@@ -25,5 +28,6 @@ layer=top
 text-color=#9a8a98
 
 [urgency=critical]
-border-color=#c46a80
+background-color=#2a1620f5
+border-color=#c46a80b3
 default-timeout=0
