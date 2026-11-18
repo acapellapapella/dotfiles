@@ -1,13 +1,23 @@
-// Movement uses critically damped springs (damping-ratio 1.0): quick start,
-// no wobble, settles in ~0.2 s and stays smooth when interrupted mid-way.
+// Workspace switches and column scrolling ease in and out: a spring starts at
+// full speed, which read as a jerk. The curve is nearly symmetric (peak speed
+// ~1.9× the average, was 2.6× with 0.3 0 0.2 1 at 340 ms), so a workspace
+// glides onto the monitor instead of snapping into place. The patched niri (zz-niri-overview-hud.patch)
+// stretches them with distance (time ∝ √distance, up to 2×), so jumping over
+// one doesn't run twice as fast. A switch interrupted by the next key repeat or
+// wheel step keeps its speed instead of restarting from rest (also the patch);
+// without that, every step braked and set off again. Window movement and resizing stay on
+// critically damped springs (damping-ratio 1.0): no wobble, smooth when
+// interrupted mid-way.
 
 animations {
     workspace-switch {
-        spring damping-ratio=1.0 stiffness=800 epsilon=0.0001
+        duration-ms 420
+        curve "cubic-bezier" 0.42 0.0 0.35 1.0
     }
 
     horizontal-view-movement {
-        spring damping-ratio=1.0 stiffness=750 epsilon=0.0001
+        duration-ms 360
+        curve "cubic-bezier" 0.42 0.0 0.35 1.0
     }
 
     window-movement {
@@ -55,8 +65,14 @@ animations {
         "
     }
 
+    // The same curve and time as a workspace switch. A spring starts at full
+    // speed (the first frame jumped a third of the way) and settled in ~0.2 s,
+    // long before the camera reached the clicked card, so the full-size view
+    // kept sliding after the zoom. Clicking a card runs the switch on this
+    // exact animation (the patch keeps it unstretched), so both end together.
     overview-open-close {
-        spring damping-ratio=1.0 stiffness=700 epsilon=0.0001
+        duration-ms 420
+        curve "cubic-bezier" 0.42 0.0 0.35 1.0
     }
 
     screenshot-ui-open {
