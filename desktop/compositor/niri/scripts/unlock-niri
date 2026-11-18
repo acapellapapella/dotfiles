@@ -1,0 +1,23 @@
+#!/bin/sh
+# Rescue for a stuck lock screen: run it from another console.
+#
+#   1. Ctrl+Alt+F2, log in.
+#   2. unlock-niri
+#   3. Ctrl+Alt+F1 (back to niri), type your password, Enter.
+#
+# It starts a fresh swaylock inside the running niri session. niri replaces the
+# dead lock with it, and you unlock as usual.
+
+export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
+sock=$(ls "$XDG_RUNTIME_DIR" | grep -m1 '^wayland-[0-9]*$')
+if [ -z "$sock" ]; then
+    echo "No niri session found in $XDG_RUNTIME_DIR." >&2
+    exit 1
+fi
+export WAYLAND_DISPLAY="$sock"
+# A hung swaylock is killed; midve-lock's loop (if it is running) starts a new
+# one, otherwise we start midve-lock ourselves.
+pkill -x swaylock
+sleep 0.5
+setsid -f "$HOME/.local/bin/midve-lock" >/dev/null 2>&1
+echo "Lock screen restarted on $sock. Switch back with Ctrl+Alt+F1 and type your password."

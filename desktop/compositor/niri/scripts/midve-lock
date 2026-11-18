@@ -1,0 +1,30 @@
+#!/bin/sh
+# Lock the session and keep it locked until you unlock it.
+#
+# swaylock can die on resume from sleep, when the monitors reconnect. niri then
+# keeps the session locked (rightly) but nothing draws the password prompt, so
+# the screen is stuck. Here swaylock runs in a loop: exit status 0 means you
+# typed the password, and anything else means it crashed, so it starts again
+# at once and takes the lock back over (niri replaces a dead lock).
+#
+# Used by swayidle (idle, before-sleep, loginctl lock-session). Running it
+# twice is harmless: the second call sees the first one's lock file and exits.
+# Exit statuses of crashed swaylocks go to ~/.cache/midve-lock.log.
+
+lockfile="${XDG_RUNTIME_DIR:-/tmp}/midve-lock.lock"
+log="${XDG_CACHE_HOME:-$HOME/.cache}/midve-lock.log"
+
+(
+    flock -n 9 || exit 0
+    while :; do
+        swaylock
+        status=$?
+        [ "$status" -eq 0 ] && break
+        echo "$(date '+%F %T') swaylock exited with $status, restarting" >>"$log"
+        sleep 0.3
+    done
+) 9>"$lockfile" &
+
+# swayidle -w waits for this command before letting the machine sleep; give
+# swaylock a moment to take the lock so the screen is never shown unlocked.
+sleep 0.5

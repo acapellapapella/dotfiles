@@ -39,6 +39,8 @@ link "$niri/waybar-niri/config.jsonc"        "$cfg/waybar/config.jsonc"
 link "$niri/waybar-niri/style.css"           "$cfg/waybar/style.css"
 link "$niri/portals/niri-portals.conf"       "$cfg/xdg-desktop-portal/niri-portals.conf"
 link "$niri/scripts/niri-session"            "$HOME/.local/bin/niri-session"
+link "$niri/scripts/midve-lock"              "$HOME/.local/bin/midve-lock"
+link "$niri/scripts/unlock-niri"             "$HOME/.local/bin/unlock-niri"
 link "$niri/start_niri.sh"                   "$HOME/start_niri.sh"
 
 link desktop/config/mako/config              "$cfg/mako/config"
