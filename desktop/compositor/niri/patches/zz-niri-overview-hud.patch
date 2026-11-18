@@ -1,0 +1,2999 @@
+diff --git a/niri-config/src/binds.rs b/niri-config/src/binds.rs
+index 7448c8f8..31453a60 100644
+--- a/niri-config/src/binds.rs
++++ b/niri-config/src/binds.rs
+@@ -486,6 +486,12 @@ pub enum Action {
+     OpenOverview,
+     CloseOverview,
+     #[knuffel(skip)]
++    SetOverviewWorkspacesHidden(bool),
++    /// midve: move to the card next to the current one in the overview's grid (the overview's
++    /// plain arrow keys): (columns, rows).
++    #[knuffel(skip)]
++    OverviewGridMove(i32, i32),
++    #[knuffel(skip)]
+     ToggleWindowUrgent(u64),
+     #[knuffel(skip)]
+     SetWindowUrgent(u64),
+@@ -825,6 +831,9 @@ impl From<niri_ipc::Action> for Action {
+             niri_ipc::Action::ToggleOverview {} => Self::ToggleOverview,
+             niri_ipc::Action::OpenOverview {} => Self::OpenOverview,
+             niri_ipc::Action::CloseOverview {} => Self::CloseOverview,
++            niri_ipc::Action::SetOverviewWorkspacesHidden { hidden } => {
++                Self::SetOverviewWorkspacesHidden(hidden)
++            }
+             niri_ipc::Action::ToggleWindowUrgent { id } => Self::ToggleWindowUrgent(id),
+             niri_ipc::Action::SetWindowUrgent { id } => Self::SetWindowUrgent(id),
+             niri_ipc::Action::UnsetWindowUrgent { id } => Self::UnsetWindowUrgent(id),
+diff --git a/niri-ipc/src/lib.rs b/niri-ipc/src/lib.rs
+index c314d453..f1fc02ba 100644
+--- a/niri-ipc/src/lib.rs
++++ b/niri-ipc/src/lib.rs
+@@ -930,6 +930,13 @@ pub enum Action {
+     OpenOverview {},
+     /// Close the Overview.
+     CloseOverview {},
++    /// midve: hide (true) or show (false) the workspace cards of the open Overview, for the
++    /// overview HUD's system mode.
++    SetOverviewWorkspacesHidden {
++        /// Whether the workspace cards are hidden.
++        #[cfg_attr(feature = "clap", arg(long, action = clap::ArgAction::Set))]
++        hidden: bool,
++    },
+     /// Toggle urgent status of a window.
+     ToggleWindowUrgent {
+         /// Id of the window to toggle urgent.
+diff --git a/src/animation/mod.rs b/src/animation/mod.rs
+index 73a79c5e..e1a0c218 100644
+--- a/src/animation/mod.rs
++++ b/src/animation/mod.rs
+@@ -267,7 +267,23 @@ impl Animation {
+                 let passed = passed.as_secs_f64();
+                 let total = self.duration.as_secs_f64();
+                 let x = (passed / total).clamp(0., 1.);
+-                curve.y(x) * (self.to - self.from) + self.from
++                let base = curve.y(x) * (self.to - self.from) + self.from;
++                // midve: carry the speed an interrupted animation had. A Hermite bump
++                // x·(1−x)² (zero at both ends, slope 1 at the start, flat at the end) makes the
++                // start slope match initial_velocity, so a retarget never stops dead.
++                if self.initial_velocity == 0. {
++                    base
++                } else {
++                    let slope0 = curve.y(1e-4) / 1e-4 * (self.to - self.from) / total;
++                    let k = (self.initial_velocity - slope0) * total;
++                    // Capped so the carried speed can't overshoot the target or swing back
++                    // past the start (the bump peaks at 4/27·k): a fast key repeat used to
++                    // land a workspace crookedly, a bit past its place and back.
++                    let span = (self.to - self.from).abs().max(1e-9);
++                    let dir = if self.to >= self.from { 1. } else { -1. };
++                    let k = (k * dir).clamp(-0.5 * span, span) * dir;
++                    base + k * x * (1. - x) * (1. - x)
++                }
+             }
+             Kind::Spring(spring) => {
+                 let value = spring.value_at(passed);
+@@ -297,6 +313,18 @@ impl Animation {
+         self.value_at(self.clock.now())
+     }
+ 
++    /// midve: the current speed in units per second of clock time (0 when done or off).
++    pub fn velocity(&self) -> f64 {
++        if self.is_off || self.is_done() {
++            return 0.;
++        }
++        let now = self.clock.now();
++        let dt = Duration::from_millis(2);
++        // value_at holds at `from` until start_time, so look forwards from the start.
++        let a = now.max(self.start_time + Duration::from_micros(1));
++        (self.value_at(a + dt) - self.value_at(a)) / dt.as_secs_f64()
++    }
++
+     /// Returns a value that stops at the target value after first reaching it.
+     ///
+     /// Best effort; not always exactly precise.
+@@ -364,3 +392,25 @@ impl From<niri_config::animations::Curve> for Curve {
+         }
+     }
+ }
++
++/// midve: stretch an animation for a longer trip. A spring (or easing) takes the same time for
++/// any distance, so jumping two workspaces or columns at once moves twice as fast and reads as
++/// a jerk. With this, time grows as the square root of the distance in "units" (one workspace,
++/// one view width), capped at 2× for 4 units and more; a single step is unchanged.
++pub fn scaled_for_distance(config: niri_config::Animation, units: f64) -> niri_config::Animation {
++    let units = units.abs().clamp(1., 4.);
++    if units <= 1.001 {
++        return config;
++    }
++    let mut config = config;
++    match &mut config.kind {
++        // Critically damped spring: settle time ∝ 1/√stiffness, so stiffness / units gives √units.
++        niri_config::animations::Kind::Spring(p) => {
++            p.stiffness = ((f64::from(p.stiffness) / units).round() as u32).max(1);
++        }
++        niri_config::animations::Kind::Easing(p) => {
++            p.duration_ms = (f64::from(p.duration_ms) * units.sqrt()).round() as u32;
++        }
++    }
++    config
++}
+diff --git a/src/input/mod.rs b/src/input/mod.rs
+index 8becae77..9d1d9e77 100644
+--- a/src/input/mod.rs
++++ b/src/input/mod.rs
+@@ -2455,6 +2455,14 @@ impl State {
+                     self.niri.queue_redraw_all();
+                 }
+             }
++            Action::OverviewGridMove(dx, dy) => {
++                self.niri.layout.overview_grid_move(dx, dy);
++                self.niri.queue_redraw_all();
++            }
++            Action::SetOverviewWorkspacesHidden(hidden) => {
++                self.niri.layout.set_overview_workspaces_hidden(hidden);
++                self.niri.queue_redraw_all();
++            }
+             Action::ToggleWindowUrgent(id) => {
+                 let window = self
+                     .niri
+@@ -3419,31 +3427,15 @@ impl State {
+                 if ticks != 0 {
+                     let (bind_up, bind_down) = if should_handle_in_overview && modifiers.is_empty()
+                     {
+-                        let bind_up = Some(Bind {
+-                            key: Key {
+-                                trigger: Trigger::WheelScrollUp,
+-                                modifiers: Modifiers::empty(),
+-                            },
+-                            action: BoundAction::Press(Action::FocusWorkspaceUpUnderMouse),
+-                            repeat: true,
+-                            cooldown: Some(Duration::from_millis(50)),
+-                            allow_when_locked: false,
+-                            allow_inhibiting: false,
+-                            hotkey_overlay_title: None,
+-                        });
+-                        let bind_down = Some(Bind {
+-                            key: Key {
+-                                trigger: Trigger::WheelScrollDown,
+-                                modifiers: Modifiers::empty(),
+-                            },
+-                            action: BoundAction::Press(Action::FocusWorkspaceDownUnderMouse),
+-                            repeat: true,
+-                            cooldown: Some(Duration::from_millis(50)),
+-                            allow_when_locked: false,
+-                            allow_inhibiting: false,
+-                            hotkey_overlay_title: None,
+-                        });
+-                        (bind_up, bind_down)
++                        // midve: in the overview the wheel scrolls the rows of workspaces; it
++                        // never picks one (that is a click or the keyboard).
++                        if let Some(output) = self.niri.output_under_cursor() {
++                            if let Some(mon) = self.niri.layout.monitor_for_output_mut(&output) {
++                                mon.overview_scroll_rows(ticks as f64);
++                                self.niri.queue_redraw(&output);
++                            }
++                        }
++                        (None, None)
+                     } else if should_handle_in_overview && modifiers == Modifiers::SHIFT {
+                         let bind_up = Some(Bind {
+                             key: Key {
+@@ -5209,10 +5201,12 @@ fn hardcoded_overview_bind(raw: Keysym, mods: ModifiersState) -> Option<Bind> {
+             repeat = false;
+             Action::ToggleOverview
+         }
+-        Keysym::Left => Action::FocusColumnLeft,
+-        Keysym::Right => Action::FocusColumnRight,
+-        Keysym::Up => Action::FocusWindowOrWorkspaceUp,
+-        Keysym::Down => Action::FocusWindowOrWorkspaceDown,
++        // midve: the arrows walk the grid of cards: left and right within a row, up and down
++        // between rows.
++        Keysym::Left => Action::OverviewGridMove(-1, 0),
++        Keysym::Right => Action::OverviewGridMove(1, 0),
++        Keysym::Up => Action::OverviewGridMove(0, -1),
++        Keysym::Down => Action::OverviewGridMove(0, 1),
+         _ => {
+             return None;
+         }
+diff --git a/src/layer/mapped.rs b/src/layer/mapped.rs
+index 3f7eb189..c73ea2fa 100644
+--- a/src/layer/mapped.rs
++++ b/src/layer/mapped.rs
+@@ -5,7 +5,7 @@ use smithay::backend::renderer::element::Kind;
+ use smithay::desktop::{LayerSurface, PopupKind, PopupManager};
+ use smithay::utils::{Logical, Point, Rectangle, Scale, Size};
+ use smithay::wayland::compositor::{remove_pre_commit_hook, HookId};
+-use smithay::wayland::shell::wlr_layer::{ExclusiveZone, Layer};
++use smithay::wayland::shell::wlr_layer::{Anchor, ExclusiveZone, Layer};
+ 
+ use super::ResolvedLayerRules;
+ use crate::animation::Clock;
+@@ -51,6 +51,11 @@ pub struct MappedLayer {
+     /// Scale of the output the layer surface is on (and rounds its sizes to).
+     scale: f64,
+ 
++    /// midve: the overview HUD's offscreen and its two perspective halves.
++    hud: std::cell::RefCell<HudTilt>,
++    /// midve: how far the HUD's system mode has come in on this output (the cards' stash), 0..1.
++    hud_sys: std::cell::Cell<f64>,
++
+     /// Clock for driving animations.
+     clock: Clock,
+ }
+@@ -58,6 +63,8 @@ pub struct MappedLayer {
+ niri_render_elements! {
+     LayerSurfaceRenderElement<R> => {
+         Wayland = WaylandSurfaceRenderElement<R>,
++        // midve: one half of the overview HUD, in perspective.
++        HudTilt = crate::render_helpers::shader_element::ShaderRenderElement,
+         SolidColor = SolidColorRenderElement,
+         Shadow = ShadowRenderElement,
+         BackgroundEffect = BackgroundEffectElement,
+@@ -89,6 +96,8 @@ impl MappedLayer {
+             scale,
+             shadow: Shadow::new(shadow_config),
+             blur_config: config.blur,
++            hud: Default::default(),
++            hud_sys: Default::default(),
+             clock,
+         }
+     }
+@@ -174,6 +183,370 @@ impl MappedLayer {
+         true
+     }
+ 
++    /// midve: whether this is a bar: anchored along exactly one edge and reserving space.
++    pub fn is_edge_bar(&self) -> bool {
++        self.edge_bar_dir().is_some()
++    }
++
++    /// The direction (unit vector) a bar leaves the screen in: towards its edge.
++    fn edge_bar_dir(&self) -> Option<Point<f64, Logical>> {
++        let state = self.surface.cached_state();
++        if !matches!(state.exclusive_zone, ExclusiveZone::Exclusive(z) if z > 0) {
++            return None;
++        }
++        let a = state.anchor;
++        let (t, b, l, r) = (
++            a.contains(Anchor::TOP),
++            a.contains(Anchor::BOTTOM),
++            a.contains(Anchor::LEFT),
++            a.contains(Anchor::RIGHT),
++        );
++        match (t, b, l, r) {
++            (true, false, l, r) if l == r => Some(Point::from((0., -1.))),
++            (false, true, l, r) if l == r => Some(Point::from((0., 1.))),
++            (t, b, true, false) if t == b => Some(Point::from((-1., 0.))),
++            (t, b, false, true) if t == b => Some(Point::from((1., 0.))),
++            _ => None,
++        }
++    }
++
++    /// midve: offset and alpha factor for a bar while the overview opens (hide 0..1): it
++    /// slides out past its edge by its own size and fades. Not a bar, or hide 0: no change.
++    fn overview_hide(&self, hide: f64) -> (Point<f64, Logical>, f32) {
++        // midve: the overview HUD (placed within the backdrop) fades in with the overview
++        // instead: `hide` is how far the overview has opened. It never animates itself, so
++        // the fade runs at the output's refresh rate and in step with the cards.
++        if self.is_overview_hud() {
++            // (each region fades with its own entrance, in hud_halves)
++            let q = hud_slide_progress(hide);
++            return (Point::from((0., 0.)), if q > 0. { 1. } else { 0. });
++        }
++        if hide <= 0. {
++            return (Point::from((0., 0.)), 1.);
++        }
++        if self.surface.layer() != Layer::Top {
++            return (Point::from((0., 0.)), 1.);
++        }
++        let Some(dir) = self.edge_bar_dir() else {
++            return (Point::from((0., 0.)), 1.);
++        };
++        let size = self.block_out_buffer.size();
++        let dist = if dir.x != 0. { size.w } else { size.h } + 2.;
++        let off: Point<f64, Logical> = Point::from((dir.x * dist * hide, dir.y * dist * hide));
++        let off = Point::from((
++            round_logical_in_physical(self.scale, off.x),
++            round_logical_in_physical(self.scale, off.y),
++        ));
++        (off, (1. - hide).clamp(0., 1.) as f32)
++    }
++
++    /// midve: the overview HUD's offscreen data, for frame callbacks to its surface.
++    pub fn hud_offscreen_id_for(
++        &self,
++        id: &smithay::backend::renderer::element::Id,
++    ) -> Option<smithay::backend::renderer::element::Id> {
++        let hud = self.hud.borrow();
++        let data = hud.data.as_ref()?;
++        data.states.element_was_presented(id.clone()).then(|| data.id.clone())
++    }
++
++    /// midve: the HUD's regions, from the input region of its widgets: the left flank (from the
++    /// output's left edge to just past its widgets), the right flank likewise, and the middle
++    /// between them (the mode switch, the system panel), which stays flat. Each with its pivot
++    /// (the flank's outer edge), side (-1 left, 0 middle, 1 right), slot (which cached element
++    /// draws it) and band (its place in the flank's entrance order, top first).
++    ///
++    /// Each flank is cut across into bands, one per panel (the cuts lie in the gaps between the
++    /// panels), so the panels come in one after another (HUD_BAND_STEP).
++    ///
++    /// The middle is cut in two at HUD_SWITCH_STRIP: the mode switch above stays as it is, the
++    /// system panel below fades and rises with the cards' stash (HUD_SLOT_SYS), so the HUD never
++    /// animates that big panel itself.
++    fn hud_regions(&self, size: Size<f64, Logical>) -> Vec<HudRegion> {
++        use smithay::wayland::compositor::{with_states, RectangleKind, SurfaceAttributes};
++        // Room past a flank's widgets for their shadows and hover halos.
++        const PAD: f64 = 48.;
++        let (mut l0, mut l1, mut r0, mut r1) = (f64::MAX, f64::MIN, f64::MAX, f64::MIN);
++        // the vertical spans of each flank's panels
++        let (mut lys, mut rys) = (Vec::new(), Vec::new());
++        with_states(self.surface.wl_surface(), |states| {
++            let mut attrs = states.cached_state.get::<SurfaceAttributes>();
++            if let Some(region) = &attrs.current().input_region {
++                for (kind, r) in &region.rects {
++                    if !matches!(kind, RectangleKind::Add) || r.size.w <= 0 || r.size.h <= 0 {
++                        continue;
++                    }
++                    let (x0, x1) = (f64::from(r.loc.x), f64::from(r.loc.x + r.size.w));
++                    let span = (f64::from(r.loc.y), f64::from(r.loc.y + r.size.h));
++                    let c = (x0 + x1) / 2.;
++                    if c < size.w * 0.3 {
++                        l0 = l0.min(x0);
++                        l1 = l1.max(x1);
++                        lys.push(span);
++                    } else if c > size.w * 0.7 {
++                        r0 = r0.min(x0);
++                        r1 = r1.max(x1);
++                        rys.push(span);
++                    }
++                }
++            }
++        });
++        let mid = (size.w / 2.).round();
++        let left_end = if l1 == f64::MIN { 0. } else { (l1 + PAD).round().min(mid) };
++        let right_start = if r0 == f64::MAX { size.w } else { (r0 - PAD).round().max(mid) };
++        let left_pivot = if l0 == f64::MAX { 0. } else { l0.max(0.) };
++        let right_pivot = if r1 == f64::MIN { size.w } else { r1.min(size.w) };
++
++        // Where to cut a flank: the middle of each gap between its panels (spans that touch or
++        // overlap are one panel). At most HUD_BANDS bands.
++        let cuts = |mut ys: Vec<(f64, f64)>| -> Vec<f64> {
++            ys.sort_by(|a, b| a.0.total_cmp(&b.0));
++            let mut merged: Vec<(f64, f64)> = Vec::new();
++            for (a, b) in ys {
++                match merged.last_mut() {
++                    Some(m) if a <= m.1 + 4. => m.1 = m.1.max(b),
++                    _ => merged.push((a, b)),
++                }
++            }
++            let mut out: Vec<f64> = merged.windows(2).map(|w| ((w[0].1 + w[1].0) / 2.).round()).collect();
++            out.truncate(HUD_BANDS - 1);
++            out
++        };
++        let bands = |x0: f64, x1: f64, cuts: Vec<f64>| -> Vec<Rectangle<f64, Logical>> {
++            let mut ys = vec![0.];
++            ys.extend(cuts.into_iter().filter(|&y| y > 0. && y < size.h));
++            ys.push(size.h);
++            ys.windows(2)
++                .map(|w| Rectangle::new(Point::from((x0, w[0])), Size::from((x1 - x0, w[1] - w[0]))))
++                .collect()
++        };
++
++        let mut out = Vec::with_capacity(2 + 2 * HUD_BANDS);
++        if left_end > 0. {
++            for (k, rect) in bands(0., left_end, cuts(lys)).into_iter().enumerate() {
++                out.push(HudRegion { rect, pivot: left_pivot, side: -1., slot: HUD_SLOT_LEFT + k, band: k });
++            }
++        }
++        if right_start > left_end {
++            let strip = HUD_SWITCH_STRIP.min(size.h);
++            let top = Rectangle::new(
++                Point::from((left_end, 0.)),
++                Size::from((right_start - left_end, strip)),
++            );
++            out.push(HudRegion { rect: top, pivot: 0., side: 0., slot: HUD_SLOT_SWITCH, band: 0 });
++            if size.h > strip {
++                let below = Rectangle::new(
++                    Point::from((left_end, strip)),
++                    Size::from((right_start - left_end, size.h - strip)),
++                );
++                out.push(HudRegion { rect: below, pivot: 0., side: 0., slot: HUD_SLOT_SYS, band: 0 });
++            }
++        }
++        if size.w > right_start {
++            for (k, rect) in bands(right_start, size.w, cuts(rys)).into_iter().enumerate() {
++                out.push(HudRegion { rect, pivot: right_pivot, side: 1., slot: HUD_SLOT_RIGHT + k, band: k });
++            }
++        }
++        out
++    }
++
++    /// midve: the homographies (region uv -> output-logical) of the HUD's regions this frame,
++    /// with each region's alpha: the flanks' bands turned about their outer pivots and slid in
++    /// by the overview's progress `open`, one after another; the middle flat, in place.
++    fn hud_halves(
++        &self,
++        location: Point<f64, Logical>,
++        open: f64,
++    ) -> Vec<(Rectangle<f64, Logical>, glam::DMat3, f32, usize)> {
++        let size = self.block_out_buffer.size();
++        let q = hud_slide_progress(open);
++        // Portrait outputs have no flanks, only small corner panels: those stay flat.
++        let deg = if size.h > size.w { 0. } else { HUD_TILT_DEG };
++        // The flanks sway slightly with the cards (the middle stays put), each on its own phase.
++        let now = self.clock.now().as_secs_f64();
++        let sway = q * q;
++        // The system panel comes in as the cards sink away: it fades and rises 24 px.
++        let sys = self.hud_sys.get().clamp(0., 1.);
++        let sys = sys * sys * (3. - 2. * sys);
++        self.hud_regions(size)
++            .into_iter()
++            .filter(|r| r.slot != HUD_SLOT_SYS || sys > 0.002)
++            .map(|HudRegion { rect, pivot, side, slot, band }| {
++                // this band's own entrance: later bands start later and catch up by the end
++                let qb = hud_band_progress(open, band);
++                let e = 1. - (1. - qb).powi(3);
++                let dx = (1. - e) * size.w * 0.3;
++                let fade = (qb * qb * (3. - 2. * qb)) as f32;
++                let (turn, drift, _) = crate::layout::overview_tilt::idle_sway(now, 7.1 + side * 2.3);
++                let (turn, drift) = if side == 0. { (0., 0.) } else { (turn, drift) };
++                let deg = deg + if deg > 0. { HUD_SWAY_TURN_DEG * sway * turn } else { 0. };
++                let h = hud_half_homography(rect, pivot, side * deg.to_radians(), size);
++                let rise = if slot == HUD_SLOT_SYS { 24. * (1. - sys) } else { 0. };
++                let t = glam::DMat3::from_translation(glam::DVec2::new(
++                    location.x + side * dx,
++                    location.y + HUD_SWAY_DRIFT_PX * sway * drift + rise,
++                ));
++                let alpha = if slot == HUD_SLOT_SYS { sys as f32 } else { 1. } * fade;
++                (rect, t * h, alpha, slot)
++            })
++            .collect()
++    }
++
++    /// midve: the flat point on the HUD surface (surface-local) that is drawn at `pos`
++    /// (surface-local too), with the overview opened `open`. None where nothing is drawn.
++    pub fn hud_unproject(&self, pos: Point<f64, Logical>, open: f64) -> Option<Point<f64, Logical>> {
++        if !self.is_overview_hud() {
++            return Some(pos);
++        }
++        for (rect, h, _, _) in self.hud_halves(Point::from((0., 0.)), open) {
++            let q = h.inverse() * glam::DVec3::new(pos.x, pos.y, 1.);
++            if q.z.abs() < 1e-12 {
++                continue;
++            }
++            let (u, v) = (q.x / q.z, q.y / q.z);
++            if (0. ..=1.).contains(&u) && (0. ..=1.).contains(&v) {
++                return Some(Point::from((rect.loc.x + u * rect.size.w, rect.loc.y + v * rect.size.h)));
++            }
++        }
++        None
++    }
++
++    fn render_hud(
++        &self,
++        ctx: RenderCtx<smithay::backend::renderer::gles::GlesRenderer>,
++        location: Point<f64, Logical>,
++        alpha: f32,
++        open: f64,
++    ) -> Option<Vec<crate::render_helpers::shader_element::ShaderRenderElement>> {
++        use crate::render_helpers::shader_element::ShaderRenderElement;
++        use crate::render_helpers::shaders::{mat3_uniform, ProgramType, Shaders};
++        use smithay::backend::renderer::element::Element as _;
++        use smithay::backend::renderer::Texture as _;
++
++        let renderer = &mut *ctx.renderer;
++        Shaders::get(renderer).program(ProgramType::HudTilt)?;
++        let scale = Scale::from(self.scale);
++        // The offscreen is drawn at the client's integer buffer scale (GTK draws at 2 on a 1.4
++        // output), so the HUD's pixels go in 1:1 and are resampled only once, by the shader.
++        let tex_scale = Scale::from(self.scale.ceil().max(1.));
++        let mut hud = self.hud.borrow_mut();
++        let hud = &mut *hud;
++
++        // The offscreen redraws into its texture only while nothing else holds it.
++        for e in hud.elems.iter_mut().flatten() {
++            drop(e.take_textures());
++        }
++        let mut elems: Vec<WaylandSurfaceRenderElement<smithay::backend::renderer::gles::GlesRenderer>> =
++            Vec::new();
++        push_elements_from_surface_tree(
++            renderer,
++            self.surface.wl_surface(),
++            Point::from((0, 0)),
++            tex_scale,
++            1.,
++            Kind::Unspecified,
++            &mut |elem| elems.push(elem),
++        );
++        if elems.is_empty() {
++            hud.data = None;
++            return Some(Vec::new());
++        }
++        let (off, _sync, mut data) = match hud.buffer.render(renderer, tex_scale, &elems) {
++            Ok(x) => x,
++            Err(err) => {
++                warn!("error rendering the overview HUD to offscreen: {err:?}");
++                return None;
++            }
++        };
++        let texture = off.texture().clone();
++        let tex_size = glam::DVec2::new(
++            f64::from(texture.width()) / tex_scale.x,
++            f64::from(texture.height()) / tex_scale.y,
++        );
++        let tex_loc = glam::DVec2::new(off.offset().x, off.offset().y);
++        let commit = off.current_commit();
++
++        let mut out = Vec::new();
++        for (rect, h, region_alpha, i) in self.hud_halves(location, open) {
++            let alpha = alpha * region_alpha;
++            let corners = [(0., 0.), (1., 0.), (0., 1.), (1., 1.)].map(|(u, v)| {
++                let p = h * glam::DVec3::new(u, v, 1.);
++                glam::DVec2::new(p.x / p.z, p.y / p.z)
++            });
++            let min = corners.iter().fold(glam::DVec2::splat(f64::MAX), |a, c| a.min(*c));
++            let max = corners.iter().fold(glam::DVec2::splat(f64::MIN), |a, c| a.max(*c));
++            let loc = Point::<f64, Logical>::from((min.x - 1., min.y - 1.))
++                .to_physical_precise_floor(scale)
++                .to_logical(scale);
++            let end = Point::<f64, Logical>::from((max.x + 1., max.y + 1.))
++                .to_physical_precise_ceil(scale)
++                .to_logical(scale);
++            let area = Rectangle::new(loc, Size::from((end.x - loc.x, end.y - loc.y)));
++            if area.size.w < 1. || area.size.h < 1. {
++                continue;
++            }
++            let input_to_uv = h.inverse()
++                * glam::DMat3::from_translation(glam::DVec2::new(area.loc.x, area.loc.y))
++                * glam::DMat3::from_scale(glam::DVec2::new(area.size.w, area.size.h));
++            let uv_to_tex = glam::DMat3::from_scale(glam::DVec2::ONE / tex_size)
++                * glam::DMat3::from_translation(glam::DVec2::new(rect.loc.x, rect.loc.y) - tex_loc)
++                * glam::DMat3::from_scale(glam::DVec2::new(rect.size.w, rect.size.h));
++
++            let qz = |x: f64| (x * 64.).round() as i64;
++            let key = (
++                commit,
++                [qz(area.loc.x), qz(area.loc.y), qz(area.size.w), qz(area.size.h), qz(h.x_axis.x), qz(rect.loc.x) ^ (qz(rect.loc.y) << 28), (alpha * 1000.) as i64],
++            );
++            let textures = std::collections::HashMap::from([(String::from("niri_tex"), texture.clone())]);
++            let elem = hud.elems[i]
++                .get_or_insert_with(|| ShaderRenderElement::empty(ProgramType::HudTilt, Kind::Unspecified));
++            if hud.keys[i] != Some(key) {
++                let uniforms: std::rc::Rc<[smithay::backend::renderer::gles::Uniform<'static>]> =
++                    std::rc::Rc::new([
++                        mat3_uniform("tilt_input_to_uv", input_to_uv.as_mat3()),
++                        mat3_uniform("tilt_uv_to_tex", uv_to_tex.as_mat3()),
++                        smithay::backend::renderer::gles::Uniform::new(
++                            "tilt_px",
++                            [
++                                (1. / (area.size.w * scale.x)) as f32,
++                                (1. / (area.size.h * scale.y)) as f32,
++                            ],
++                        ),
++                        smithay::backend::renderer::gles::Uniform::new(
++                            "tilt_tex_px",
++                            [
++                                (tex_size.x * tex_scale.x) as f32,
++                                (tex_size.y * tex_scale.y) as f32,
++                            ],
++                        ),
++                    ]);
++                elem.update(area.size, None, scale.x as f32, alpha, uniforms, textures);
++                hud.keys[i] = Some(key);
++            } else {
++                elem.restore_textures(textures);
++            }
++            out.push(elem.clone().with_location(area.loc));
++        }
++        // The surface counts as shown through the first half's element.
++        if let Some(first) = out.first() {
++            data.id = first.id().clone();
++            hud.data = Some(data);
++        } else {
++            hud.data = None;
++        }
++        Some(out)
++    }
++
++    /// midve: how far the system mode has come in on this layer's output (0..1).
++    pub fn set_hud_sys(&self, amount: f64) {
++        self.hud_sys.set(amount);
++    }
++
++    /// midve: the overview HUD (namespace midve-hud, placed within the backdrop).
++    fn is_overview_hud(&self) -> bool {
++        self.place_within_backdrop() && self.surface.namespace() == "midve-hud"
++    }
++
+     pub fn bob_offset(&self) -> Point<f64, Logical> {
+         if !self.rules.baba_is_float {
+             return Point::from((0., 0.));
+@@ -190,12 +563,17 @@ impl MappedLayer {
+         ns: Option<usize>,
+         location: Point<f64, Logical>,
+         xray_pos: XrayPos,
++        hide: f64,
+         push: &mut dyn FnMut(LayerSurfaceRenderElement<R>),
+     ) {
+         let scale = Scale::from(self.scale);
+-        let alpha = self.rules.opacity.unwrap_or(1.).clamp(0., 1.);
++        let (hide_off, hide_alpha) = self.overview_hide(hide);
++        if hide_alpha <= 0. {
++            return;
++        }
++        let alpha = self.rules.opacity.unwrap_or(1.).clamp(0., 1.) * hide_alpha;
+ 
+-        let bob_offset = self.bob_offset();
++        let bob_offset = self.bob_offset() + hide_off;
+         let location = location + bob_offset;
+         let xray_pos = xray_pos.offset(bob_offset);
+ 
+@@ -218,6 +596,18 @@ impl MappedLayer {
+             // Layer surfaces don't have extra geometry like windows.
+             let buf_pos = location;
+ 
++            // midve: the overview HUD is drawn by niri in perspective: its two halves (the
++            // flanks) turn towards the middle and slide in from their sides, on the GPU. The
++            // HUD itself draws flat and never animates per frame.
++            if self.is_overview_hud() {
++                if let Some(elems) = self.render_hud(ctx.as_gles(), buf_pos, alpha, hide) {
++                    for elem in elems {
++                        push(LayerSurfaceRenderElement::HudTilt(elem));
++                    }
++                    return;
++                }
++            }
++
+             push_elements_from_surface_tree(
+                 ctx.renderer,
+                 surface,
+@@ -261,16 +651,21 @@ impl MappedLayer {
+         ns: Option<usize>,
+         location: Point<f64, Logical>,
+         xray_pos: XrayPos,
++        hide: f64,
+         push: &mut dyn FnMut(LayerSurfaceRenderElement<R>),
+     ) {
++        let (hide_off, hide_alpha) = self.overview_hide(hide);
++        if hide_alpha <= 0. {
++            return;
++        }
+         if ctx.target.should_block_out(self.rules.block_out_from) {
+             return;
+         }
+ 
+         let scale = Scale::from(self.scale);
+-        let alpha = self.rules.opacity.unwrap_or(1.).clamp(0., 1.);
++        let alpha = self.rules.opacity.unwrap_or(1.).clamp(0., 1.) * hide_alpha;
+ 
+-        let bob_offset = self.bob_offset();
++        let bob_offset = self.bob_offset() + hide_off;
+         let location = location + bob_offset;
+         let xray_pos = xray_pos.offset(bob_offset);
+ 
+@@ -335,3 +730,83 @@ impl Drop for MappedLayer {
+         remove_pre_commit_hook(self.surface.wl_surface(), &self.pre_commit_hook);
+     }
+ }
++
++/// midve: how far the HUD's flanks have come in, 0..1, for an overview opened `open` (0..1).
++/// They start once the cards have shrunk out of their way, so the HUD never shows over the
++/// zooming workspace.
++fn hud_slide_progress(open: f64) -> f64 {
++    ((open - 0.3) / 0.7).clamp(0., 1.)
++}
++
++/// midve: the entrance of a flank's band `band` (0 at the top), 0..1. Each band starts
++/// HUD_BAND_STEP of the opening after the one above it and takes the same time, so the panels
++/// come out one after another and leave in reverse; all are in by the end of the opening.
++fn hud_band_progress(open: f64, band: usize) -> f64 {
++    let delay = HUD_BAND_STEP * band.min(HUD_BANDS - 1) as f64;
++    let len = 0.7 - HUD_BAND_STEP * (HUD_BANDS - 1) as f64;
++    ((open - 0.3 - delay) / len).clamp(0., 1.)
++}
++
++/// midve: one region of the HUD (see `hud_regions`).
++struct HudRegion {
++    rect: Rectangle<f64, Logical>,
++    pivot: f64,
++    side: f64,
++    slot: usize,
++    band: usize,
++}
++
++/// midve: at most this many bands (panels) per flank, and the step between their entrances
++/// (a share of the overview's opening: about 50 ms of it).
++const HUD_BANDS: usize = 3;
++const HUD_BAND_STEP: f64 = 0.08;
++/// midve: the cached elements' slots: the switch, the system panel, then each flank's bands.
++const HUD_SLOT_SWITCH: usize = 0;
++const HUD_SLOT_SYS: usize = 1;
++const HUD_SLOT_LEFT: usize = 2;
++const HUD_SLOT_RIGHT: usize = HUD_SLOT_LEFT + HUD_BANDS;
++const HUD_SLOTS: usize = HUD_SLOT_RIGHT + HUD_BANDS;
++
++/// midve: how far the HUD's flanks turn towards the middle (about their outer edges), degrees.
++const HUD_TILT_DEG: f64 = 24.;
++/// midve: the strip along the HUD's top edge that holds the mode switch (logical px).
++const HUD_SWITCH_STRIP: f64 = 64.;
++
++/// midve: the overview HUD's offscreen and the cached elements of its two halves.
++#[derive(Debug, Default)]
++struct HudTilt {
++    buffer: crate::render_helpers::offscreen::OffscreenBuffer,
++    elems: [Option<crate::render_helpers::shader_element::ShaderRenderElement>; HUD_SLOTS],
++    keys: [Option<(smithay::backend::renderer::utils::CommitCounter, [i64; 7])>; HUD_SLOTS],
++    data: Option<crate::render_helpers::offscreen::OffscreenData>,
++}
++
++/// midve: homography from a HUD half's uv (0..1) to the HUD surface's coordinates, for the half
++/// turned by `angle` about the vertical line x = `pivot`, seen in perspective from the middle
++/// of the output (`view`), with the same distance as the overview cards (0.7 of the width).
++/// midve: the HUD flanks' idle sway: extra turn and vertical drift at most.
++const HUD_SWAY_TURN_DEG: f64 = 0.7;
++const HUD_SWAY_DRIFT_PX: f64 = 3.;
++
++fn hud_half_homography(
++    rect: Rectangle<f64, Logical>,
++    pivot: f64,
++    angle: f64,
++    view: Size<f64, Logical>,
++) -> glam::DMat3 {
++    let (w, h) = (rect.size.w, rect.size.h);
++    let (pcx, pcy) = (view.w / 2., view.h / 2.);
++    let d = (view.w * 0.7).max(1.);
++    let (s, c) = angle.sin_cos();
++    // X = x - pivot = w·u + a; the point goes to (pivot + c·X, y, s·X) and is projected.
++    let a = rect.loc.x - pivot;
++    let k = c - pcx * s / d;
++    let r0 = [w * k, 0., pivot + a * k];
++    let r1 = [-pcy * s * w / d, h, rect.loc.y - pcy * s * a / d];
++    let r2 = [-s * w / d, 0., 1. - s * a / d];
++    glam::DMat3::from_cols(
++        glam::DVec3::new(r0[0], r1[0], r2[0]),
++        glam::DVec3::new(r0[1], r1[1], r2[1]),
++        glam::DVec3::new(r0[2], r1[2], r2[2]),
++    )
++}
+diff --git a/src/layout/mod.rs b/src/layout/mod.rs
+index 11f97ba5..af34e942 100644
+--- a/src/layout/mod.rs
++++ b/src/layout/mod.rs
+@@ -81,6 +81,7 @@ pub mod focus_ring;
+ pub mod insert_hint_element;
+ pub mod monitor;
+ pub mod opening_window;
++pub mod overview_tilt;
+ pub mod scrolling;
+ pub mod shadow;
+ pub mod tab_indicator;
+@@ -2766,16 +2767,9 @@ impl<W: LayoutElement> Layout<W> {
+             }
+         }
+ 
+-        // Move the overview along with the focus to another output.
+-        if self.overview_open && self.set_overview_output_to_active() {
+-            self.overview_progress = Some(OverviewProgress::Animation(Animation::new(
+-                self.clock.clone(),
+-                0.,
+-                1.,
+-                0.,
+-                self.options.animations.overview_open_close.0,
+-            )));
+-        }
++        // midve: the overview stays on its own output. Focusing something on another monitor
++        // (a click, IPC, a new window) leaves it open where it is; only toggling the overview
++        // from another output moves it there (toggle_overview).
+ 
+         self.set_monitors_overview_state();
+ 
+@@ -4655,6 +4649,36 @@ impl<W: LayoutElement> Layout<W> {
+         self.unname_workspace_by_id(id);
+     }
+ 
++    /// midve: in the overview's grid, go to the card `dx` columns and `dy` rows away from the
++    /// current one (the overview's arrow keys).
++    pub fn overview_grid_move(&mut self, dx: i32, dy: i32) {
++        let Some(output) = self.active_output().cloned() else {
++            return;
++        };
++        if !self.is_overview_open_on(&output) {
++            return;
++        }
++        let Some(mon) = self.monitor_for_output_mut(&output) else {
++            return;
++        };
++        if let Some(idx) = mon.overview_grid_target(dx, dy) {
++            mon.switch_workspace(idx);
++        }
++    }
++
++    /// midve: hide or show the workspace cards on the output where the overview is open.
++    pub fn set_overview_workspaces_hidden(&mut self, hidden: bool) {
++        if !self.overview_open {
++            return;
++        }
++        let Some(output) = self.overview_output.clone() else {
++            return;
++        };
++        if let Some(mon) = self.monitor_for_output_mut(&output) {
++            mon.set_workspaces_hidden(hidden);
++        }
++    }
++
+     pub fn set_monitors_overview_state(&mut self) {
+         let MonitorSet::Normal { monitors, .. } = &mut self.monitor_set else {
+             return;
+@@ -4692,6 +4716,21 @@ impl<W: LayoutElement> Layout<W> {
+     }
+ 
+     pub fn toggle_overview(&mut self) {
++        // midve: toggling on another monitor while the overview is open elsewhere moves it
++        // here instead of closing it.
++        if self.overview_open && self.active_output() != self.overview_output.as_ref() {
++            self.set_overview_output_to_active();
++            self.overview_progress = Some(OverviewProgress::Animation(Animation::new(
++                self.clock.clone(),
++                0.,
++                1.,
++                0.,
++                self.options.animations.overview_open_close.0,
++            )));
++            self.set_monitors_overview_state();
++            return;
++        }
++
+         self.overview_open = !self.overview_open;
+ 
+         let mut from = self.overview_progress.take().map_or(0., |p| p.value());
+diff --git a/src/layout/monitor.rs b/src/layout/monitor.rs
+index 3befce14..fb397c02 100644
+--- a/src/layout/monitor.rs
++++ b/src/layout/monitor.rs
+@@ -1,4 +1,6 @@
++use std::cell::RefCell;
+ use std::cmp::min;
++use std::collections::HashMap;
+ use std::iter::zip;
+ use std::rc::Rc;
+ use std::time::Duration;
+@@ -81,6 +83,31 @@ pub struct Monitor<W: LayoutElement> {
+     pub(super) overview_open: bool,
+     /// Progress of the overview zoom animation, 1 is fully in overview.
+     overview_progress: Option<OverviewProgress>,
++    /// midve: how far the overview's grid is scrolled away from the active workspace's row,
++    /// in rows, and its animation. Reset whenever the active workspace changes.
++    overview_scroll: f64,
++    overview_scroll_anim: Option<Animation>,
++    /// midve: perspective cards of the overview, one per workspace, and the offscreen data of
++    /// the last frame (so surfaces drawn into the cards still count as presented).
++    tilt_cards: RefCell<HashMap<WorkspaceId, super::overview_tilt::TiltCard>>,
++    /// midve: the label under each card (number and apps).
++    card_labels: RefCell<HashMap<WorkspaceId, super::overview_tilt::CardLabel>>,
++    /// midve: the card under the pointer, and how far each card has turned to face the viewer
++    /// (0..1, eased towards its target every frame).
++    overview_hover: Option<WorkspaceId>,
++    hover_amount: HashMap<WorkspaceId, f64>,
++    hover_last: Option<Duration>,
++    /// midve: when the overview finished opening: the current card seats into its slot.
++    seat_start: Option<Duration>,
++    /// midve: how lit each card's lilac outline is (0..1). It eases towards the current
++    /// workspace, so on ↑/↓ the outline fades on the old card as it comes up on the new one.
++    glow_amount: HashMap<WorkspaceId, f64>,
++    /// midve: when a soft glint started across a card that turned to face the pointer.
++    glint_start: HashMap<WorkspaceId, Duration>,
++    /// midve: system mode of the overview HUD: the cards sink away (0 shown .. 1 hidden).
++    ws_hidden: bool,
++    stash: Option<Animation>,
++    pub(crate) tilt_data: RefCell<Vec<crate::render_helpers::offscreen::OffscreenData>>,
+     /// Clock for driving animations.
+     pub(super) clock: Clock,
+     /// Configurable properties of the layout as received from the parent layout.
+@@ -342,6 +369,19 @@ impl<W: LayoutElement> Monitor<W> {
+             insert_hint_render_loc: None,
+             overview_open: false,
+             overview_progress: None,
++            overview_scroll: 0.,
++            overview_scroll_anim: None,
++            tilt_cards: RefCell::new(HashMap::new()),
++            card_labels: RefCell::new(HashMap::new()),
++            overview_hover: None,
++            hover_amount: HashMap::new(),
++            hover_last: None,
++            seat_start: None,
++            glow_amount: HashMap::new(),
++            glint_start: HashMap::new(),
++            ws_hidden: false,
++            stash: None,
++            tilt_data: RefCell::new(Vec::new()),
+             workspace_switch: None,
+             clock,
+             base_options,
+@@ -458,8 +498,17 @@ impl<W: LayoutElement> Monitor<W> {
+         let prev_active_idx = self.active_workspace_idx;
+         self.active_workspace_idx = idx;
+ 
++        // midve: a switch given its own config runs in step with something else (the overview
++        // closing into the clicked card, a DnD hold): it must keep that config's exact time and
++        // start from rest, or the camera and the zoom finish apart and the view slides on.
++        let synced = config.is_some();
+         let config = config.unwrap_or(self.options.animations.workspace_switch.0);
+ 
++        // midve: picking a workspace brings the overview's view back to its row.
++        if prev_active_idx != idx {
++            self.overview_scroll_to(0., config);
++        }
++
+         match &mut self.workspace_switch {
+             // During a DnD scroll, we want to visually animate even if idx matches the active idx.
+             Some(WorkspaceSwitch::Gesture(gesture)) if gesture.dnd_last_event_time.is_some() => {
+@@ -480,11 +529,25 @@ impl<W: LayoutElement> Monitor<W> {
+                     return;
+                 }
+ 
++                // midve: a jump over several workspaces takes a little longer instead of
++                // moving faster.
++                let config = if synced {
++                    config
++                } else {
++                    crate::animation::scaled_for_distance(config, idx as f64 - current_idx)
++                };
++                // midve: an interrupted switch keeps its speed (key repeat, wheel steps).
++                let velocity = match &self.workspace_switch {
++                    Some(WorkspaceSwitch::Animation(anim)) if !synced => {
++                        anim.velocity() * self.clock.rate()
++                    }
++                    _ => 0.,
++                };
+                 self.workspace_switch = Some(WorkspaceSwitch::Animation(Animation::new(
+                     self.clock.clone(),
+                     current_idx,
+                     idx as f64,
+-                    0.,
++                    velocity,
+                     config,
+                 )));
+             }
+@@ -1065,15 +1128,89 @@ impl<W: LayoutElement> Monitor<W> {
+             None => (),
+         }
+ 
++        if self.overview_scroll_anim.as_ref().is_some_and(|a| a.is_done()) {
++            self.overview_scroll_anim = None;
++        }
++
++        // midve: ease each card towards facing the viewer (hovered) or back.
++        let now = self.clock.now();
++        let dt = self
++            .hover_last
++            .map_or(0., |last| now.saturating_sub(last).as_secs_f64())
++            .min(0.1);
++        self.hover_last = Some(now);
++        let k = 1. - (-dt / HOVER_TAU).exp();
++        let hovered = self.overview_hover.filter(|_| self.overview_progress.is_some());
++        if let Some(id) = hovered {
++            self.hover_amount.entry(id).or_insert(0.);
++        }
++        self.hover_amount.retain(|id, v| {
++            let target = if Some(*id) == hovered { 1. } else { 0. };
++            *v += (target - *v) * k;
++            target > 0. || *v > 0.002
++        });
++        // the outline follows the current workspace; while the overview is closed it simply
++        // sits on the current one, so opening starts lit where it should be
++        let current = self.workspaces.get(self.active_workspace_idx).map(|ws| ws.id());
++        if self.overview_progress.is_none() {
++            self.glow_amount.clear();
++            if let Some(id) = current {
++                self.glow_amount.insert(id, 1.);
++            }
++        } else {
++            if let Some(id) = current {
++                self.glow_amount.entry(id).or_insert(0.);
++            }
++            let kg = 1. - (-dt / GLOW_TAU).exp();
++            self.glow_amount.retain(|id, v| {
++                let target = if Some(*id) == current { 1. } else { 0. };
++                *v += (target - *v) * kg;
++                if (target - *v).abs() < 0.002 {
++                    *v = target;
++                }
++                target > 0. || *v > 0.
++            });
++        }
++        self.glint_start
++            .retain(|_, t| now.saturating_sub(*t).as_secs_f64() < GLINT_DELAY + GLINT_SECS + GLINT_REST);
++        if self
++            .seat_start
++            .is_some_and(|t| now.saturating_sub(t).as_secs_f64() > SEAT_SECS)
++        {
++            self.seat_start = None;
++        }
++        if self.stash.as_ref().is_some_and(|a| a.is_done()) {
++            self.stash = None;
++        }
++
+         for ws in &mut self.workspaces {
+             ws.advance_animations();
+         }
+     }
+ 
+     pub(super) fn are_animations_ongoing(&self) -> bool {
+-        self.workspace_switch
+-            .as_ref()
+-            .is_some_and(|s| s.is_animation_ongoing())
++        // midve: the open overview sways while it is shown.
++        self.overview_open_amount() > 0.
++            || self.stash.is_some()
++            || self.seat_start.is_some()
++            || {
++                let current = self.workspaces.get(self.active_workspace_idx).map(|ws| ws.id());
++                self.glow_amount
++                    .iter()
++                    .any(|(id, v)| *v != if Some(*id) == current { 1. } else { 0. })
++            }
++            || self.glint_start.values().any(|t| {
++                self.clock.now().saturating_sub(*t).as_secs_f64() < GLINT_DELAY + GLINT_SECS
++            })
++            || self.hover_amount.iter().any(|(id, v)| {
++                let target = if Some(*id) == self.overview_hover { 1. } else { 0. };
++                (target - v).abs() > 0.002
++            })
++            || self.overview_scroll_anim.is_some()
++            || self
++                .workspace_switch
++                .as_ref()
++                .is_some_and(|s| s.is_animation_ongoing())
+             || self.workspaces.iter().any(|ws| ws.are_animations_ongoing())
+     }
+ 
+@@ -1378,9 +1515,28 @@ impl<W: LayoutElement> Monitor<W> {
+ 
+     pub(super) fn set_overview_progress(&mut self, progress: Option<&super::OverviewProgress>) {
+         let prev_render_idx = self.workspace_render_idx();
++        let was_open = matches!(self.overview_progress, Some(OverviewProgress::Value(v)) if v >= 0.999);
+         self.overview_progress = progress.map(OverviewProgress::from);
++        // midve: the overview just finished opening: seat the current card with a click.
++        if !was_open
++            && matches!(self.overview_progress, Some(OverviewProgress::Value(v)) if v >= 0.999)
++        {
++            self.seat_start = Some(self.clock.now());
++        }
+         let new_render_idx = self.workspace_render_idx();
+ 
++        // midve: a closed overview forgets its scroll; it opens on the active row again. Its
++        // card textures are freed.
++        if self.overview_progress.is_none() {
++            self.overview_scroll = 0.;
++            self.overview_scroll_anim = None;
++            self.tilt_cards.borrow_mut().clear();
++            self.card_labels.borrow_mut().clear();
++            self.tilt_data.borrow_mut().clear();
++            self.ws_hidden = false;
++            self.stash = None;
++        }
++
+         // If the view jumped (can happen when going from corrected to uncorrected render_idx, for
+         // example when toggling the overview in the middle of an overview animation), then restart
+         // the workspace switch to avoid jumps.
+@@ -1485,14 +1641,51 @@ impl<W: LayoutElement> Monitor<W> {
+             .to_physical_precise_round(scale)
+             .to_logical(scale);
+ 
+-        let first_ws_y = -self.workspace_render_idx() * ws_height_with_gap;
++        let render_idx = self.workspace_render_idx();
++        let first_ws_y = -render_idx * ws_height_with_gap;
+         let first_ws_y = round_logical_in_physical(scale, first_ws_y);
+ 
++        // midve: in the overview, workspaces sit in a grid of OVERVIEW_GRID_COLS columns
++        // centred on the output. Opening and closing is a camera move on that grid: the grid
++        // keeps its shape and is scaled about the current workspace, whose card goes from the
++        // full output to its slot. Nothing reshuffles on the way.
++        let grid_p = self.overview_grid_progress(zoom);
++        let cols = OVERVIEW_GRID_COLS;
++        let open_zoom = compute_overview_zoom(&self.options, Some(1.));
++        let o_size = self.workspace_size(open_zoom);
++        let o_gap = self.workspace_gap(open_zoom);
++        let o_row_h = o_size.h + o_gap + overview_label_room(open_zoom);
++        let grid_w = cols as f64 * o_size.w + (cols - 1) as f64 * o_gap;
++        let grid_x0 = (self.view_size.w - grid_w) / 2.;
++        // A little lower than centred: room for the HUD's mode switch along the top edge.
++        let grid_y0 =
++            (self.view_size.h - o_size.h) / 2. + OVERVIEW_GRID_TOP_ROOM * open_zoom / 0.26;
++        // The camera's place in the grid, as a fractional (column, row). A switch moves it in a
++        // straight line from the old card to the new one (never through the cards in between,
++        // which in a grid would zig-zag across the rows).
++        let cam_cell = self.overview_camera_cell();
++        let render_row = self.overview_clamp_row(cam_cell.1 + self.overview_scroll_value());
++        let cell_pos = move |col: f64, row: f64| -> Point<f64, Logical> {
++            Point::from((
++                grid_x0 + col * (o_size.w + o_gap),
++                grid_y0 + (row - render_row) * o_row_h,
++            ))
++        };
++        let slot = move |idx: usize| cell_pos((idx % cols) as f64, (idx / cols) as f64);
++        let anchor = cell_pos(cam_cell.0, cam_cell.1);
++        let cam_scale = zoom / open_zoom;
++
+         // Return position for one-past-last workspace too.
+         (0..=self.workspaces.len()).map(move |idx| {
+             let y = first_ws_y + idx as f64 * ws_height_with_gap;
+             let loc = Point::from((0., y)) + static_offset;
+ 
++            let loc = if grid_p > 0. {
++                anchor.upscale(grid_p) + (slot(idx) - anchor).upscale(cam_scale)
++            } else {
++                loc
++            };
++
+             // Even though all components that go into loc are rounded to physical pixels, the
+             // floating point addition may lose precision. This can result for example in the
+             // current workspace having y = 0.0000000000002 and thus missing pointer hits at the
+@@ -1503,6 +1696,362 @@ impl<W: LayoutElement> Monitor<W> {
+         })
+     }
+ 
++    /// midve: where the overview's camera is in the grid, as a fractional (column, row).
++    fn overview_camera_cell(&self) -> (f64, f64) {
++        let cols = OVERVIEW_GRID_COLS;
++        match &self.workspace_switch {
++            Some(WorkspaceSwitch::Animation(anim)) if (anim.to() - anim.from()).abs() > 1e-9 => {
++                let t = (anim.value() - anim.from()) / (anim.to() - anim.from());
++                let a = overview_grid_cell(anim.from(), cols);
++                let b = overview_grid_cell(anim.to(), cols);
++                (a.0 + (b.0 - a.0) * t, a.1 + (b.1 - a.1) * t)
++            }
++            Some(switch) => overview_grid_cell(switch.current_idx(), cols),
++            None => overview_grid_cell(self.active_workspace_idx as f64, cols),
++        }
++    }
++
++    fn overview_scroll_value(&self) -> f64 {
++        self.overview_scroll_anim
++            .as_ref()
++            .map_or(self.overview_scroll, |a| a.value())
++    }
++
++    /// midve: the range the centred row may take so the block of rows stays centred and never
++    /// leaves empty space above the first row or below the last; if all rows fit, it is fixed
++    /// at the middle of the grid.
++    fn overview_row_bounds(&self) -> (f64, f64) {
++        let open_zoom = compute_overview_zoom(&self.options, Some(1.));
++        let row_h = self.workspace_size_with_gap(open_zoom).h + overview_label_room(open_zoom);
++        let visible = if row_h > 0. { self.view_size.h / row_h } else { 1. };
++        let rows = self.workspaces.len().div_ceil(OVERVIEW_GRID_COLS) as f64;
++        if rows <= visible {
++            let c = (rows - 1.) / 2.;
++            (c, c)
++        } else {
++            let half = (visible - 1.) / 2.;
++            (half, rows - 1. - half)
++        }
++    }
++
++    fn overview_clamp_row(&self, row: f64) -> f64 {
++        let (lo, hi) = self.overview_row_bounds();
++        row.clamp(lo, hi.max(lo))
++    }
++
++    fn overview_scroll_to(&mut self, target: f64, config: niri_config::Animation) {
++        let current = self.overview_scroll_value();
++        self.overview_scroll = target;
++        self.overview_scroll_anim = if (current - target).abs() > 1e-6 {
++            Some(Animation::new(self.clock.clone(), current, target, 0., config))
++        } else {
++            None
++        };
++    }
++
++    /// midve: scroll the overview's grid by whole rows (the mouse wheel), without changing the
++    /// active workspace. Clamped so the view never runs past the first or last row.
++    pub fn overview_scroll_rows(&mut self, rows: f64) {
++        let auto_row = overview_grid_row(self.active_workspace_idx as f64, OVERVIEW_GRID_COLS);
++        let (lo, hi) = self.overview_row_bounds();
++        let target = (auto_row + self.overview_scroll + rows).clamp(lo, hi.max(lo)) - auto_row;
++        let config = self.options.animations.workspace_switch.0;
++        self.overview_scroll_to(target, config);
++    }
++
++    /// midve: how far the overview has opened on this monitor, 0..1 (follows its animation).
++    pub fn overview_open_amount(&self) -> f64 {
++        if self.overview_progress.is_none() {
++            return 0.;
++        }
++        self.overview_grid_progress(self.overview_zoom())
++    }
++
++    /// midve: hide (sink away) or show the workspace cards for the HUD's system mode.
++    pub fn set_workspaces_hidden(&mut self, hidden: bool) {
++        if self.ws_hidden == hidden {
++            return;
++        }
++        let from = self.stash_value();
++        self.ws_hidden = hidden;
++        let to = if hidden { 1. } else { 0. };
++        // Slow enough to see the cards go one after another: sinking accelerates away
++        // (ease-in-out), coming back settles softly.
++        let curve = if hidden {
++            niri_config::animations::Curve::CubicBezier(0.5, 0., 0.3, 1.)
++        } else {
++            niri_config::animations::Curve::CubicBezier(0.16, 1., 0.3, 1.)
++        };
++        let config = niri_config::Animation {
++            off: false,
++            kind: niri_config::animations::Kind::Easing(niri_config::animations::EasingParams {
++                duration_ms: if hidden { 600 } else { 700 },
++                curve,
++            }),
++        };
++        self.stash = Some(Animation::new(self.clock.clone(), from, to, 0., config));
++    }
++
++    /// midve: how far the cards are stashed away for the HUD's system mode, 0..1.
++    pub fn overview_stash_amount(&self) -> f64 {
++        if self.overview_progress.is_none() {
++            return 0.;
++        }
++        self.stash_value()
++    }
++
++    fn stash_value(&self) -> f64 {
++        self.stash
++            .as_ref()
++            .map_or(if self.ws_hidden { 1. } else { 0. }, |a| a.value())
++    }
++
++    /// Whether the cards are hidden enough that they shouldn't take input.
++    pub fn workspaces_hidden(&self) -> bool {
++        self.overview_progress.is_some() && self.stash_value() > 0.5
++    }
++
++    /// midve: set the card under the pointer (None: none). Returns whether it changed.
++    pub fn set_overview_hover(&mut self, id: Option<WorkspaceId>) -> bool {
++        if self.overview_hover == id {
++            return false;
++        }
++        self.overview_hover = id;
++        // A card that turns to face the pointer gets one glint across it, in the open overview
++        // only, and not again while the last one is still fresh (the pointer wavering on an edge).
++        if let Some(id) = id {
++            if self.overview_open_amount() > 0.95 && !self.glint_start.contains_key(&id) {
++                self.glint_start.insert(id, self.clock.now());
++            }
++        }
++        true
++    }
++
++    /// midve: how the card of workspace `idx` is posed this frame.
++    ///
++    /// - It turns towards the middle by OVERVIEW_TILT_DEG as the overview opens.
++    /// - Under the pointer it turns to face the viewer and comes forward.
++    /// - Cards other than the current one rise from depth as the overview opens and sink
++    ///   back as it closes.
++    /// - When the overview has just opened, the current card seats into its slot: a short
++    ///   push into depth with a flash along its rim.
++    pub fn overview_card_pose(&self, idx: usize) -> super::overview_tilt::TiltPose {
++        let p = self.overview_open_amount();
++        let side = if idx % OVERVIEW_GRID_COLS == 0 { -1. } else { 1. };
++        let active = idx == self.active_workspace_idx;
++        let id = self.workspaces[idx].id();
++        let hover = self.hover_amount.get(&id).copied().unwrap_or(0.);
++        let unit = self.view_size.w;
++
++        let mut z = unit * 0.028 * hover * p;
++        let mut alpha = 1.;
++        let mut flash = 0.;
++        if !active {
++            z -= unit * 0.13 * (1. - p);
++            alpha = p.powf(0.6);
++        } else if let Some(start) = self.seat_start {
++            let t = self.clock.now().saturating_sub(start).as_secs_f64();
++            if t < 0.26 {
++                z -= unit * 0.0065 * (std::f64::consts::PI * t / 0.26).sin();
++            }
++            flash = (1. - t / SEAT_SECS).max(0.);
++        }
++
++        // System mode: the cards sink away one after another, turning further and fading.
++        let stash = self.stash_value();
++        let mut angle = side * OVERVIEW_TILT_DEG.to_radians() * p * (1. - 0.75 * hover);
++        if stash > 0. {
++            let n = self.workspaces.len().max(1) as f64;
++            let order = if self.ws_hidden { idx as f64 } else { n - 1. - idx as f64 };
++            let s = (stash * (1. + 0.35) - order / n * 0.35).clamp(0., 1.);
++            let s = s * s * (3. - 2. * s);
++            z -= unit * 0.17 * s;
++            angle += side * 18f64.to_radians() * s;
++            alpha *= 1. - s;
++        }
++
++        // Idle sway: a slow, slight drift and turn, each card on its own phase. It grows in with
++        // the opening (so entering a workspace lands exactly) and stops on the hovered card, so
++        // the card you aim at holds still.
++        let (turn, drift, depth) =
++            super::overview_tilt::idle_sway(self.clock.now().as_secs_f64(), idx as f64 * 0.73 + 0.31);
++        let sway = p * p * (1. - hover);
++        angle += sway * SWAY_TURN_DEG.to_radians() * turn;
++        z += sway * unit * SWAY_DEPTH * depth;
++
++        // the glint: -1 when there is none, else how far it has crossed the card (0..1)
++        let glint = self.glint_start.get(&id).map_or(-1., |start| {
++            let t = self.clock.now().saturating_sub(*start).as_secs_f64() - GLINT_DELAY;
++            if (0. ..GLINT_SECS).contains(&t) { t / GLINT_SECS } else { -1. }
++        });
++        let glow = self.glow_amount.get(&id).copied().unwrap_or(if active { 1. } else { 0. });
++        let glow = glow * glow * (3. - 2. * glow);
++
++        super::overview_tilt::TiltPose {
++            angle,
++            z,
++            alpha: alpha as f32,
++            glow: (glow * p) as f32,
++            glint: glint as f32,
++            flash: flash as f32,
++            dy: sway * SWAY_DRIFT_PX * drift,
++            // corners, hairline and shadow melt away over the last stretch of entering a
++            // workspace, so the card becomes the output with no step at the end
++            frame: {
++                let f = (p * 2.5).clamp(0., 1.);
++                (f * f * (3. - 2. * f)) as f32
++            },
++        }
++    }
++
++    /// midve: the workspace `dx` columns and `dy` rows away from the active one in the
++    /// overview's grid. Left and right stay within the row. Down from a row whose card below
++    /// doesn't exist (an odd last row) goes to the last workspace.
++    pub fn overview_grid_target(&self, dx: i32, dy: i32) -> Option<usize> {
++        let cols = OVERVIEW_GRID_COLS as i64;
++        let n = self.workspaces.len() as i64;
++        let idx = self.active_workspace_idx as i64;
++        let (col, row) = (idx % cols, idx / cols);
++        let col = col + i64::from(dx);
++        let row = row + i64::from(dy);
++        if col < 0 || col >= cols || row < 0 {
++            return None;
++        }
++        let target = row * cols + col;
++        if target < n {
++            return Some(target as usize);
++        }
++        // Below, in a shorter last row: its last card.
++        (dy > 0 && row * cols < n).then(|| (n - 1) as usize)
++    }
++
++    /// midve: whether the overview's grid of cards is showing on this monitor.
++    pub fn overview_grid_active(&self) -> bool {
++        self.overview_progress.is_some() && self.overview_grid_progress(self.overview_zoom()) > 0.
++    }
++
++    /// midve: the card under a point as it is drawn (turned, moved forward or back by its
++    /// pose), its flat rect, and the point taken back through the perspective onto that flat
++    /// rect. Where cards overlap, the one nearest the viewer wins.
++    pub fn overview_card_under(
++        &self,
++        pos: Point<f64, Logical>,
++    ) -> Option<(usize, Rectangle<f64, Logical>, Point<f64, Logical>)> {
++        if !self.overview_grid_active() || self.workspaces_hidden() {
++            return None;
++        }
++        let mut best = None;
++        let mut best_z = f64::MIN;
++        for ((idx, _), geo) in self.workspaces_with_render_geo_idx() {
++            let pose = self.overview_card_pose(idx);
++            if pose.alpha < 0.05 || pose.z <= best_z {
++                continue;
++            }
++            let Some((u, v)) =
++                super::overview_tilt::unproject(pose.placed(geo), self.view_size, pose.angle, pose.z, pos)
++            else {
++                continue;
++            };
++            if (0. ..=1.).contains(&u) && (0. ..=1.).contains(&v) {
++                let flat = Point::from((geo.loc.x + u * geo.size.w, geo.loc.y + v * geo.size.h));
++                best = Some((idx, geo, flat));
++                best_z = pose.z;
++            }
++        }
++        best
++    }
++
++    /// midve: the zoom a card's texture is drawn at. The texture is drawn at one of a few
++    /// fixed zoom levels (the open overview's, with room for the hover, then ×1.6 steps up to
++    /// 1), the smallest that is still sharp for the card's size on screen. So while the camera
++    /// moves on open or close, a card is redrawn only when it crosses a level (three times at
++    /// most), not every frame; between those it is the same texture, posed by the shader.
++    pub fn overview_card_tex_zoom(&self, card: Rectangle<f64, Logical>) -> f64 {
++        let open_zoom = compute_overview_zoom(&self.options, Some(1.));
++        let need = (card.size.w / self.view_size.w.max(1.)).min(1.);
++        // 1.5× the open size: the supersampling in the shader then has real detail to average.
++        let mut level = (open_zoom * 1.5).min(1.);
++        while level < need - 1e-6 && level < 1. {
++            level = (level * 1.6).min(1.);
++        }
++        level
++    }
++
++    /// midve: draw one workspace's elements as a perspective card.
++    pub fn render_tilted_card(
++        &self,
++        renderer: &mut smithay::backend::renderer::gles::GlesRenderer,
++        idx: usize,
++        card: Rectangle<f64, Logical>,
++        tex_zoom: f64,
++        elements: &[impl smithay::backend::renderer::element::RenderElement<
++            smithay::backend::renderer::gles::GlesRenderer,
++        >],
++    ) -> Option<crate::render_helpers::shader_element::ShaderRenderElement> {
++        let ws = self.workspaces.get(idx)?;
++        let pose = self.overview_card_pose(idx);
++        let scale = smithay::utils::Scale::from(self.scale.fractional_scale());
++        let mut cards = self.tilt_cards.borrow_mut();
++        let card_state = cards.entry(ws.id()).or_default();
++        let tex_card = Rectangle::from_size(self.view_size.upscale(tex_zoom));
++        let (elem, data) = card_state.render(
++            renderer, elements, card, tex_card, self.view_size, scale, pose,
++        )?;
++        self.tilt_data.borrow_mut().push(data);
++        Some(elem)
++    }
++
++    /// midve: the label under the card of workspace `idx`: `markup` is its text (pango
++    /// markup). It lies in the card's plane under its bottom edge (it turns, recedes and
++    /// comes forward with the card), never taller than the room between rows, fades with
++    /// the card, and appears only late in the opening so it doesn't fly across the screen.
++    /// The label of the card under the pointer is brighter.
++    pub fn render_card_label(
++        &self,
++        renderer: &mut smithay::backend::renderer::gles::GlesRenderer,
++        idx: usize,
++        card: Rectangle<f64, Logical>,
++        markup: &str,
++    ) -> Option<crate::render_helpers::shader_element::ShaderRenderElement> {
++        let ws = self.workspaces.get(idx)?;
++        let pose = self.overview_card_pose(idx);
++        let p = self.overview_open_amount();
++        let hover = self.hover_amount.get(&ws.id()).copied().unwrap_or(0.);
++        let active = idx == self.active_workspace_idx;
++        let base = if active { 0.95 } else { 0.68 };
++        let shown = base + (1. - base) * hover;
++        let alpha = pose.alpha as f64 * ((p - 0.6) / 0.4).clamp(0., 1.) * shown;
++        if alpha <= 0.01 {
++            return None;
++        }
++        let open_zoom = compute_overview_zoom(&self.options, Some(1.));
++        let cam = card.size.w / self.workspace_size(open_zoom).w.max(1.);
++        let room = (self.workspace_gap(open_zoom) + overview_label_room(open_zoom)) * cam;
++        let max_h = (room - 2. * super::overview_tilt::LABEL_GAP).max(1.);
++        let scale = self.scale.fractional_scale();
++        let mut labels = self.card_labels.borrow_mut();
++        labels.entry(ws.id()).or_default().render(
++            renderer,
++            markup,
++            card,
++            self.view_size,
++            scale,
++            max_h,
++            self.workspace_size(open_zoom).w,
++            pose,
++            alpha as f32,
++        )
++    }
++
++    /// How far the overview has opened, 0 (closed) to 1 (fully open), for the grid layout.
++    fn overview_grid_progress(&self, zoom: f64) -> f64 {
++        let open_zoom = compute_overview_zoom(&self.options, Some(1.));
++        if open_zoom >= 1. {
++            return 0.;
++        }
++        ((1. - zoom) / (1. - open_zoom)).clamp(0., 1.)
++    }
++
+     pub fn workspaces_with_render_geo_cull(
+         &self,
+         cull: bool,
+@@ -1548,6 +2097,32 @@ impl<W: LayoutElement> Monitor<W> {
+         &self,
+         pos_within_output: Point<f64, Logical>,
+     ) -> Option<(&Workspace<W>, Rectangle<f64, Logical>)> {
++        // midve: hidden cards (the HUD's system mode) take no input.
++        if self.workspaces_hidden() {
++            return None;
++        }
++
++        // midve: in the overview's grid, workspaces share rows, so pick the one whose card is
++        // nearest to the pointer instead of the one whose row it is in.
++        if self.overview_grid_active() {
++            if let Some((idx, geo, _)) = self.overview_card_under(pos_within_output) {
++                return Some((&self.workspaces[idx], geo));
++            }
++            let p = pos_within_output;
++            let mut best = None;
++            let mut best_d = f64::MAX;
++            for (ws, geo) in self.workspaces_with_render_geo() {
++                let dx = (geo.loc.x - p.x).max(p.x - (geo.loc.x + geo.size.w)).max(0.);
++                let dy = (geo.loc.y - p.y).max(p.y - (geo.loc.y + geo.size.h)).max(0.);
++                let d = dx * dx + dy * dy;
++                if d < best_d {
++                    best_d = d;
++                    best = Some((ws, geo));
++                }
++            }
++            return best;
++        }
++
+         let (ws, geo) = self.workspaces_with_render_geo().find_map(|(ws, geo)| {
+             // Extend width to entire output.
+             let loc = Point::from((0., geo.loc.y));
+@@ -1563,11 +2138,33 @@ impl<W: LayoutElement> Monitor<W> {
+         &self,
+         pos_within_output: Point<f64, Logical>,
+     ) -> Option<&Workspace<W>> {
++        if self.workspaces_hidden() {
++            return None;
++        }
++        // midve: in the grid, the card as drawn (in perspective, posed).
++        if self.overview_grid_active() {
++            return self
++                .overview_card_under(pos_within_output)
++                .map(|(idx, _, _)| &self.workspaces[idx]);
++        }
+         self.workspaces_with_render_geo()
+             .find_map(|(ws, geo)| geo.contains(pos_within_output).then_some(ws))
+     }
+ 
+     pub fn window_under(&self, pos_within_output: Point<f64, Logical>) -> Option<(&W, HitType)> {
++        // midve: in the grid, hit the window where it is drawn: the pointer is taken back
++        // through the card's perspective onto the flat card.
++        if self.overview_grid_active() {
++            if self.workspaces_hidden() {
++                return None;
++            }
++            let (idx, geo, flat) = self.overview_card_under(pos_within_output)?;
++            let zoom = self.overview_zoom();
++            let pos_within_workspace = (flat - geo.loc).downscale(zoom);
++            let (win, hit) = self.workspaces[idx].window_under(pos_within_workspace)?;
++            return Some((win, hit.to_activate()));
++        }
++
+         let (ws, geo) = self.workspace_under(pos_within_output)?;
+ 
+         if self.overview_progress.is_some() {
+@@ -1596,6 +2193,29 @@ impl<W: LayoutElement> Monitor<W> {
+         &self,
+         pos_within_output: Point<f64, Logical>,
+     ) -> (InsertWorkspace, Rectangle<f64, Logical>) {
++        // midve: in the grid, drop onto the card under the pointer as drawn, or else the nearest
++        // one. The returned rect is shifted so that (pointer - rect.loc) is the pointer's place
++        // on the flat card, which is what the callers turn into a place in the workspace.
++        if self.overview_grid_active() {
++            let p = pos_within_output;
++            let (idx, geo, flat) = self.overview_card_under(p).unwrap_or_else(|| {
++                let mut best = (self.active_workspace_idx, Rectangle::default(), p);
++                let mut best_d = f64::MAX;
++                for ((idx, _), geo) in self.workspaces_with_render_geo_idx() {
++                    let cx = p.x.clamp(geo.loc.x, geo.loc.x + geo.size.w);
++                    let cy = p.y.clamp(geo.loc.y, geo.loc.y + geo.size.h);
++                    let d = (cx - p.x).powi(2) + (cy - p.y).powi(2);
++                    if d < best_d {
++                        best_d = d;
++                        best = (idx, geo, Point::from((cx, cy)));
++                    }
++                }
++                best
++            });
++            let shifted = Rectangle::new(geo.loc + (p - flat), geo.size);
++            return (InsertWorkspace::Existing(self.workspaces[idx].id()), shifted);
++        }
++
+         let mut iter = self.workspaces_with_render_geo_idx();
+ 
+         let dummy = Rectangle::default();
+@@ -1684,6 +2304,9 @@ impl<W: LayoutElement> Monitor<W> {
+         &self,
+         mut ctx: RenderCtx<R>,
+         focus_ring: bool,
++        // midve: only this workspace, drawn into its overview card's texture at this zoom with
++        // its origin at (0, 0), so the texture doesn't depend on where the card is.
++        only: Option<(WorkspaceId, f64)>,
+         push: &mut dyn FnMut(MonitorRenderElement<R>),
+     ) {
+         let _span = tracy_client::span!("Monitor::render_workspaces");
+@@ -1692,7 +2315,8 @@ impl<W: LayoutElement> Monitor<W> {
+         // Ceil the height in physical pixels.
+         let height = (self.view_size.h * scale).ceil() as i32;
+ 
+-        let zoom = self.overview_zoom();
++        let zoom = only.map_or_else(|| self.overview_zoom(), |(_, z)| z);
++        let card_geo = Rectangle::from_size(self.view_size.upscale(zoom));
+ 
+         let insert_hint_render_loc = self
+             .insert_hint_render_loc
+@@ -1750,6 +2374,10 @@ impl<W: LayoutElement> Monitor<W> {
+                 };
+ 
+             for (ws, geo) in self.workspaces_with_render_geo_cull(cull) {
++                if only.is_some_and(|(id, _)| ws.id() != id) {
++                    continue;
++                }
++                let geo = if only.is_some() { card_geo } else { geo };
+                 // Macro instead of closure because ws and insert hint have different elem types.
+                 macro_rules! push {
+                     () => {{
+@@ -2232,3 +2860,68 @@ impl<W: LayoutElement> Monitor<W> {
+         }
+     }
+ }
++
++/// midve: number of columns in the overview's workspace grid.
++const OVERVIEW_GRID_COLS: usize = 2;
++
++/// midve: extra room above the grid for the HUD's mode switch, logical px at zoom 0.26.
++const OVERVIEW_GRID_TOP_ROOM: f64 = 26.;
++
++/// midve: how far the columns of cards turn towards the middle, degrees.
++const OVERVIEW_TILT_DEG: f64 = 16.;
++
++/// midve: extra room between grid rows for the card labels, logical px at zoom 0.26. With the
++/// row gap it holds the label (13 px type) and a margin above and below, so a label never
++/// reaches the next row's cards.
++const OVERVIEW_LABEL_ROOM: f64 = 16.;
++
++fn overview_label_room(open_zoom: f64) -> f64 {
++    OVERVIEW_LABEL_ROOM * open_zoom / 0.26
++}
++
++/// midve: time constant of a card turning to face the pointer, seconds.
++const HOVER_TAU: f64 = 0.07;
++
++/// midve: time constant of the lilac outline moving to another card, seconds.
++const GLOW_TAU: f64 = 0.075;
++/// midve: the glint across a card that turns to the pointer: it starts once the card is
++/// turning, takes GLINT_SECS to cross, and the card can't glint again for GLINT_REST after.
++const GLINT_DELAY: f64 = 0.04;
++const GLINT_SECS: f64 = 0.62;
++const GLINT_REST: f64 = 0.9;
++
++/// midve: length of the seat-and-flash when the overview has opened, seconds.
++const SEAT_SECS: f64 = 0.42;
++/// midve: the open overview's idle sway: at most this much extra turn, drift and depth (as a
++/// share of the output width). Slight on purpose: noticed, never watched.
++const SWAY_TURN_DEG: f64 = 0.9;
++const SWAY_DRIFT_PX: f64 = 3.;
++const SWAY_DEPTH: f64 = 0.006;
++
++/// midve: the grid cell (column, row) of a workspace index. A fractional index (a gesture, an
++/// interrupted switch) lies on the straight line between the two cards around it.
++fn overview_grid_cell(idx: f64, cols: usize) -> (f64, f64) {
++    let idx = idx.max(0.);
++    let lo = idx.floor();
++    let t = idx - lo;
++    let cell = |i: f64| {
++        let i = i as usize;
++        ((i % cols) as f64, (i / cols) as f64)
++    };
++    let a = cell(lo);
++    if t < 1e-9 {
++        return a;
++    }
++    let b = cell(lo + 1.);
++    (a.0 + (b.0 - a.0) * t, a.1 + (b.1 - a.1) * t)
++}
++
++/// midve: the grid row to centre for a (possibly fractional, animating) render index. Moving
++/// between workspaces in the same row keeps the row still; moving to the next row scrolls by one
++/// row while the index crosses from the row's last column to the next row's first.
++fn overview_grid_row(render_idx: f64, cols: usize) -> f64 {
++    let cols = cols as f64;
++    let row = (render_idx / cols).floor();
++    let within = render_idx - row * cols;
++    row + (within - (cols - 1.)).max(0.)
++}
+diff --git a/src/layout/overview_tilt.rs b/src/layout/overview_tilt.rs
+new file mode 100644
+index 00000000..0198ef56
+--- /dev/null
++++ b/src/layout/overview_tilt.rs
+@@ -0,0 +1,398 @@
++//! midve: overview workspace cards drawn with real perspective.
++//!
++//! Each visible workspace is rendered into its own offscreen texture (the
++//! offscreen's damage tracker only redraws what changed), then shown through
++//! the `Tilt` shader with the inverse of the card's homography. The shader
++//! element keeps one id per workspace and is only updated when the content or
++//! the tilt parameters change, so a still overview causes no damage.
++
++use std::collections::HashMap;
++use std::rc::Rc;
++
++use glam::{Mat3, Vec2, Vec3};
++use smithay::backend::renderer::element::{Element as _, Kind, RenderElement};
++use smithay::backend::renderer::gles::{GlesRenderer, Uniform};
++use smithay::backend::renderer::utils::CommitCounter;
++use smithay::backend::renderer::Texture as _;
++use smithay::utils::{Logical, Point, Rectangle, Scale, Size};
++
++use crate::render_helpers::offscreen::{OffscreenBuffer, OffscreenData};
++use crate::render_helpers::shader_element::ShaderRenderElement;
++use crate::render_helpers::shaders::{mat3_uniform, ProgramType, Shaders};
++
++/// Room around a card for its shadow and glow, in logical px.
++const SHADOW_MARGIN: f64 = 44.;
++
++/// How a card is posed this frame.
++#[derive(Debug, Clone, Copy, PartialEq)]
++pub struct TiltPose {
++    /// Rotation about the card's vertical axis, radians. Negative turns the right edge away.
++    pub angle: f64,
++    /// Distance towards the viewer, logical px.
++    pub z: f64,
++    pub alpha: f32,
++    /// Lilac rim and glow of the current workspace, 0..1.
++    pub glow: f32,
++    /// Short flash when the card seats into its slot, 0..1.
++    pub flash: f32,
++    /// A soft glint crossing the card (it turned to face the pointer): how far it has gone,
++    /// 0..1, or -1 for none.
++    pub glint: f32,
++    /// Vertical drift of the idle sway, logical px (down is positive).
++    pub dy: f64,
++    /// The card's frame (rounded corners, hairline, shadow), 0..1: none when it is the output.
++    pub frame: f32,
++}
++
++impl TiltPose {
++    /// The card's rect moved by the pose's drift.
++    pub fn placed(&self, card: Rectangle<f64, Logical>) -> Rectangle<f64, Logical> {
++        Rectangle::new(Point::from((card.loc.x, card.loc.y + self.dy)), card.size)
++    }
++}
++
++/// midve: the idle sway of everything in the open overview (cards and HUD flanks), at time
++/// `t` (seconds) for an object with its own `seed`: (turn, drift, depth), each about -1..1.
++/// Each is a sum of two slow sines with periods that never line up (5.7–13.1 s), and each
++/// object has its own phases, so the motion doesn't read as a loop and nothing moves in step.
++pub fn idle_sway(t: f64, seed: f64) -> (f64, f64, f64) {
++    use std::f64::consts::TAU;
++    let w = |period: f64, phase: f64| (TAU * t / period + phase).sin();
++    let turn = 0.6 * w(9.3, seed * 2.17) + 0.4 * w(5.7, seed * 4.31 + 1.);
++    let drift = 0.6 * w(7.9, seed * 1.37 + 2.) + 0.4 * w(13.1, seed * 3.71);
++    let depth = 0.7 * w(11.3, seed * 5.13 + 0.5) + 0.3 * w(6.7, seed * 2.89);
++    (turn, drift, depth)
++}
++
++#[derive(Debug, Default)]
++pub struct TiltCard {
++    buffer: OffscreenBuffer,
++    elem: Option<ShaderRenderElement>,
++    /// What the element was last updated for: the offscreen content and the quantised pose.
++    key: Option<(CommitCounter, [i64; 11])>,
++}
++
++/// Homography from the card's uv (0..1) to output-logical coordinates (homogeneous), for a
++/// card rotated about its vertical axis and moved by `z`, seen in perspective from the middle
++/// of the output.
++pub fn card_homography(
++    card: Rectangle<f64, Logical>,
++    view: Size<f64, Logical>,
++    angle: f64,
++    z: f64,
++) -> Mat3 {
++    let (w, h) = (card.size.w, card.size.h);
++    let cx = card.loc.x + w / 2.;
++    let cy = card.loc.y + h / 2.;
++    let (pcx, pcy) = (view.w / 2., view.h / 2.);
++    // Perspective distance: about 0.7 of the output width, like the mockup's 1700px on 2457px.
++    let d = (view.w * 0.7).max(1.);
++    let (s, c) = angle.sin_cos();
++    let z0 = z - s * w / 2.;
++
++    // Rows of H: (sx·w', sy·w', w') in terms of (u, v, 1).
++    let r0 = [w * (c - pcx * s / d), 0., cx - c * w / 2. - pcx * z0 / d];
++    let r1 = [-pcy * s * w / d, h, cy - h / 2. - pcy * z0 / d];
++    let r2 = [-s * w / d, 0., 1. - z0 / d];
++    let col = |j: usize| Vec3::new(r0[j] as f32, r1[j] as f32, r2[j] as f32);
++    Mat3::from_cols(col(0), col(1), col(2))
++}
++
++/// The point on a posed card (its uv, 0..1 inside) that is drawn at `pos` on the output, in
++/// f64: the inverse of `card_homography`. None if `pos` is behind the viewer.
++pub fn unproject(
++    card: Rectangle<f64, Logical>,
++    view: Size<f64, Logical>,
++    angle: f64,
++    z: f64,
++    pos: Point<f64, Logical>,
++) -> Option<(f64, f64)> {
++    let m = card_homography(card, view, angle, z).as_dmat3().inverse();
++    let q = m * glam::DVec3::new(pos.x, pos.y, 1.);
++    (q.z.abs() > 1e-12).then(|| (q.x / q.z, q.y / q.z))
++}
++
++fn project(m: Mat3, u: f32, v: f32) -> Option<Vec2> {
++    let p = m * Vec3::new(u, v, 1.);
++    (p.z > 1e-4).then(|| Vec2::new(p.x / p.z, p.y / p.z))
++}
++
++impl TiltCard {
++    #[allow(clippy::too_many_arguments)]
++    pub fn render(
++        &mut self,
++        renderer: &mut GlesRenderer,
++        elements: &[impl RenderElement<GlesRenderer>],
++        card: Rectangle<f64, Logical>,
++        // Where the card is in the elements' own space (they are drawn at a fixed zoom).
++        tex_card: Rectangle<f64, Logical>,
++        view: Size<f64, Logical>,
++        scale: Scale<f64>,
++        pose: TiltPose,
++    ) -> Option<(ShaderRenderElement, OffscreenData)> {
++        Shaders::get(renderer).program(ProgramType::Tilt)?;
++        if card.size.w < 1. || card.size.h < 1. {
++            return None;
++        }
++
++        // The offscreen redraws into its texture only while nothing else holds it; otherwise it
++        // allocates a new one and redraws the whole workspace, every frame. Let go of it here.
++        drop(self.elem.as_mut().map(|e| e.take_textures()));
++
++        let (off, _sync, mut data) = match self.buffer.render(renderer, scale, elements) {
++            Ok(x) => x,
++            Err(err) => {
++                warn!("error rendering overview card to offscreen: {err:?}");
++                return None;
++            }
++        };
++
++        let hm = card_homography(pose.placed(card), view, pose.angle, pose.z);
++        let inv = hm.inverse();
++
++        // The quad: the projected corners' bounding box, grown for the shadow, on physical px.
++        let corners = [(0., 0.), (1., 0.), (0., 1.), (1., 1.)].map(|(u, v)| project(hm, u, v));
++        if corners.iter().any(|c| c.is_none()) {
++            return None;
++        }
++        let corners = corners.map(|c| c.unwrap());
++        let min = corners.iter().fold(Vec2::splat(f32::MAX), |a, c| a.min(*c));
++        let max = corners.iter().fold(Vec2::splat(f32::MIN), |a, c| a.max(*c));
++        let m = SHADOW_MARGIN as f32;
++        let loc = Point::<f64, Logical>::from(((min.x - m) as f64, (min.y - m) as f64))
++            .to_physical_precise_floor(scale)
++            .to_logical(scale);
++        let end = Point::<f64, Logical>::from(((max.x + m) as f64, (max.y + m) as f64))
++            .to_physical_precise_ceil(scale)
++            .to_logical(scale);
++        let area = Rectangle::new(loc, Size::from((end.x - loc.x, end.y - loc.y)));
++
++        let area_loc = Vec2::new(area.loc.x as f32, area.loc.y as f32);
++        let area_size = Vec2::new(area.size.w as f32, area.size.h as f32);
++        let input_to_uv = inv * Mat3::from_translation(area_loc) * Mat3::from_scale(area_size);
++
++        // uv on the card -> texture coordinates of the offscreen.
++        let texture = off.texture().clone();
++        let tex_scale = Vec2::new(scale.x as f32, scale.y as f32);
++        let tex_size = Vec2::new(texture.width() as f32, texture.height() as f32) / tex_scale;
++        let tex_loc = Vec2::new(off.offset().x as f32, off.offset().y as f32);
++        let tcard_loc = Vec2::new(tex_card.loc.x as f32, tex_card.loc.y as f32);
++        let tcard_size = Vec2::new(tex_card.size.w as f32, tex_card.size.h as f32);
++        let uv_to_tex = Mat3::from_scale(Vec2::ONE / tex_size)
++            * Mat3::from_translation(tcard_loc - tex_loc)
++            * Mat3::from_scale(tcard_size);
++        let card_size = Vec2::new(card.size.w as f32, card.size.h as f32);
++        let card_px = card_size * tex_scale;
++
++        // Update the element only when something changed, so a still overview has no damage.
++        let q = |x: f64, k: f64| (x * k).round() as i64;
++        let key = (
++            off.current_commit(),
++            [
++                q(area.loc.x, 64.),
++                q(area.loc.y, 64.),
++                q(area.size.w, 64.),
++                q(area.size.h, 64.),
++                q(pose.angle, 1e5),
++                q(pose.z, 64.),
++                q(pose.alpha as f64, 1e3),
++                q(pose.glow as f64, 1e3),
++                q(pose.flash as f64, 1e3),
++                q(pose.frame as f64, 1e3),
++                q(pose.glint as f64, 1e3),
++            ],
++        );
++
++        let tex_px = [texture.width() as f32, texture.height() as f32];
++        let uniforms: Rc<[Uniform<'static>]> = Rc::new([
++            Uniform::new("tilt_tex_px", tex_px),
++            Uniform::new("tilt_frame", pose.frame),
++            mat3_uniform("tilt_input_to_uv", input_to_uv),
++            mat3_uniform("tilt_uv_to_tex", uv_to_tex),
++            Uniform::new("tilt_card_px", card_px.to_array()),
++            Uniform::new("tilt_glow", pose.glow),
++            Uniform::new("tilt_flash", pose.flash),
++            Uniform::new("tilt_glint", pose.glint),
++            Uniform::new(
++                "tilt_px",
++                [
++                    (1. / (area.size.w * scale.x)) as f32,
++                    (1. / (area.size.h * scale.y)) as f32,
++                ],
++            ),
++        ]);
++        let textures = HashMap::from([(String::from("niri_tex"), texture)]);
++
++        let elem = self
++            .elem
++            .get_or_insert_with(|| ShaderRenderElement::empty(ProgramType::Tilt, Kind::Unspecified));
++        if self.key != Some(key) {
++            elem.update(area.size, None, scale.x as f32, pose.alpha, uniforms, textures);
++            self.key = Some(key);
++        } else {
++            // Same texture and contents: no damage.
++            elem.restore_textures(textures);
++        }
++        let elem = elem.clone().with_location(area.loc);
++
++        // Surfaces drawn into the offscreen count as presented through this element.
++        data.id = elem.id().clone();
++        Some((elem, data))
++    }
++}
++
++/// Gap between a card's bottom edge and its label, in the card's plane (logical px).
++pub const LABEL_GAP: f64 = 6.;
++
++/// midve: a card's label, "3  kitty · firefox". It lies in the card's own plane, under its
++/// bottom edge, so it turns, recedes and comes forward with the card. The text is drawn once
++/// per text, scale and width; the element is updated only when the text or the pose changes.
++#[derive(Debug, Default)]
++pub struct CardLabel {
++    key: Option<(String, i64, i64)>,
++    buffer: Option<crate::render_helpers::texture::TextureBuffer<smithay::backend::renderer::gles::GlesTexture>>,
++    elem: Option<ShaderRenderElement>,
++    elem_key: Option<[i64; 7]>,
++}
++
++impl CardLabel {
++    #[allow(clippy::too_many_arguments)]
++    pub fn render(
++        &mut self,
++        renderer: &mut GlesRenderer,
++        markup: &str,
++        card: Rectangle<f64, Logical>,
++        view: Size<f64, Logical>,
++        scale: f64,
++        max_h: f64,
++        slot_w: f64,
++        pose: TiltPose,
++        alpha: f32,
++    ) -> Option<ShaderRenderElement> {
++        Shaders::get(renderer).program(ProgramType::TiltLabel)?;
++        if card.size.w < 1. || card.size.h < 1. {
++            return None;
++        }
++        // The text is laid out once for the card's size in the open overview (`slot_w`) and
++        // scaled with the card while it moves, so the opening never re-renders it per frame.
++        let slot_w = slot_w.max(1.);
++        let cam = card.size.w / slot_w;
++        let key = (markup.to_owned(), (scale * 1000.) as i64, slot_w.round() as i64);
++        let text_changed = self.key.as_ref() != Some(&key);
++        if text_changed {
++            self.buffer = render_label(renderer, markup, scale, slot_w)
++                .map_err(|err| warn!("error rendering an overview label: {err:?}"))
++                .ok();
++            self.key = Some(key);
++            self.elem_key = None;
++        }
++        let buffer = self.buffer.as_ref()?;
++        let size = buffer.logical_size().upscale(cam);
++        // Never taller than the room between rows: shrink rather than reach the next card.
++        let k = if size.h > max_h && max_h > 0. { max_h / size.h } else { 1. };
++        let (lw, lh) = (size.w * k, size.h * k);
++
++        // Label uv -> card uv (centred under the bottom edge) -> screen.
++        let (w, h) = (card.size.w, card.size.h);
++        let u0 = (w - lw) / 2. / w;
++        let v0 = 1. + LABEL_GAP / h;
++        let to_card = Mat3::from_cols(
++            Vec3::new((lw / w) as f32, 0., 0.),
++            Vec3::new(0., (lh / h) as f32, 0.),
++            Vec3::new(u0 as f32, v0 as f32, 1.),
++        );
++        let hm = card_homography(pose.placed(card), view, pose.angle, pose.z) * to_card;
++
++        let corners = [(0., 0.), (1., 0.), (0., 1.), (1., 1.)].map(|(u, v)| project(hm, u, v));
++        if corners.iter().any(|c| c.is_none()) {
++            return None;
++        }
++        let corners = corners.map(|c| c.unwrap());
++        let min = corners.iter().fold(Vec2::splat(f32::MAX), |a, c| a.min(*c));
++        let max = corners.iter().fold(Vec2::splat(f32::MIN), |a, c| a.max(*c));
++        let scale_xy = Scale::from(scale);
++        let loc = Point::<f64, Logical>::from(((min.x - 1.) as f64, (min.y - 1.) as f64))
++            .to_physical_precise_floor(scale_xy)
++            .to_logical(scale_xy);
++        let end = Point::<f64, Logical>::from(((max.x + 1.) as f64, (max.y + 1.) as f64))
++            .to_physical_precise_ceil(scale_xy)
++            .to_logical(scale_xy);
++        let area = Rectangle::new(loc, Size::from((end.x - loc.x, end.y - loc.y)));
++        let area_loc = Vec2::new(area.loc.x as f32, area.loc.y as f32);
++        let area_size = Vec2::new(area.size.w as f32, area.size.h as f32);
++        let input_to_uv = hm.inverse() * Mat3::from_translation(area_loc) * Mat3::from_scale(area_size);
++
++        let q = |x: f64, k: f64| (x * k).round() as i64;
++        let ekey = [
++            q(area.loc.x, 64.),
++            q(area.loc.y, 64.),
++            q(area.size.w, 64.),
++            q(area.size.h, 64.),
++            q(pose.angle, 1e5),
++            q(pose.z, 64.),
++            q(alpha as f64, 1e3),
++        ];
++        let elem = self.elem.get_or_insert_with(|| {
++            ShaderRenderElement::empty(ProgramType::TiltLabel, Kind::Unspecified)
++        });
++        if self.elem_key != Some(ekey) {
++            let uniforms: Rc<[Uniform<'static>]> =
++                Rc::new([mat3_uniform("tilt_input_to_uv", input_to_uv)]);
++            let textures = HashMap::from([(String::from("niri_tex"), buffer.texture().clone())]);
++            elem.update(area.size, None, scale as f32, alpha, uniforms, textures);
++            self.elem_key = Some(ekey);
++        }
++        Some(elem.clone().with_location(area.loc))
++    }
++}
++
++fn render_label(
++    renderer: &mut GlesRenderer,
++    markup: &str,
++    scale: f64,
++    max_w: f64,
++) -> anyhow::Result<crate::render_helpers::texture::TextureBuffer<smithay::backend::renderer::gles::GlesTexture>> {
++    use pangocairo::cairo::{self, ImageSurface};
++    use pangocairo::pango::{EllipsizeMode, FontDescription};
++
++    let mut font = FontDescription::from_string("Onest 13px");
++    font.set_absolute_size((13. * scale * f64::from(pangocairo::pango::SCALE)).round());
++    let width = ((max_w * scale).floor() as i32).max(1);
++
++    let layout_for = |cr: &cairo::Context| {
++        let layout = pangocairo::functions::create_layout(cr);
++        layout.context().set_round_glyph_positions(false);
++        layout.set_font_description(Some(&font));
++        layout.set_width(width * pangocairo::pango::SCALE);
++        layout.set_ellipsize(EllipsizeMode::End);
++        layout.set_markup(markup);
++        layout
++    };
++
++    let surface = ImageSurface::create(cairo::Format::ARgb32, 0, 0)?;
++    let cr = cairo::Context::new(&surface)?;
++    let (w, h) = layout_for(&cr).pixel_size();
++    // a transparent pixel border: the label is sampled in perspective, and its edges stay clean
++    let pad = 2;
++    let (w, h) = (w.max(1) + 2 * pad, h.max(1) + 2 * pad);
++
++    let surface = ImageSurface::create(cairo::Format::ARgb32, w, h)?;
++    let cr = cairo::Context::new(&surface)?;
++    let layout = layout_for(&cr);
++    cr.set_source_rgba(0.925, 0.878, 0.933, 1.);
++    cr.move_to(f64::from(pad), f64::from(pad));
++    pangocairo::functions::show_layout(&cr, &layout);
++    drop(cr);
++
++    let data = surface.take_data().unwrap();
++    Ok(crate::render_helpers::texture::TextureBuffer::from_memory(
++        renderer,
++        &data,
++        smithay::reexports::gbm::Format::Argb8888,
++        (w, h),
++        false,
++        scale,
++        smithay::utils::Transform::Normal,
++        Vec::new(),
++    )?)
++}
+diff --git a/src/layout/scrolling.rs b/src/layout/scrolling.rs
+index 4f462c65..9274641b 100644
+--- a/src/layout/scrolling.rs
++++ b/src/layout/scrolling.rs
+@@ -755,11 +755,23 @@ impl<W: LayoutElement> ScrollingSpace<W> {
+             }
+             _ => {
+                 // FIXME: also compute and use current velocity.
++                // midve: a jump over several columns takes a little longer instead of moving
++                // faster; the unit is half the view width (about one column).
++                let unit = (self.view_size.w / 2.).max(1.);
++                let config = crate::animation::scaled_for_distance(
++                    config,
++                    (new_view_offset - self.view_offset.current()) / unit,
++                );
++                // midve: an interrupted scroll keeps its speed.
++                let velocity = match &self.view_offset {
++                    ViewOffset::Animation(anim) => anim.velocity() * self.clock.rate(),
++                    _ => 0.,
++                };
+                 self.view_offset = ViewOffset::Animation(Animation::new(
+                     self.clock.clone(),
+                     self.view_offset.current(),
+                     new_view_offset,
+-                    0.,
++                    velocity,
+                     config,
+                 ));
+             }
+diff --git a/src/niri.rs b/src/niri.rs
+index 1c175db2..6714721f 100644
+--- a/src/niri.rs
++++ b/src/niri.rs
+@@ -167,6 +167,7 @@ use crate::render_helpers::blur::BlurOptions;
+ use crate::render_helpers::debug::push_opaque_regions;
+ use crate::render_helpers::primary_gpu_texture::PrimaryGpuTextureRenderElement;
+ use crate::render_helpers::renderer::NiriRenderer;
++use crate::render_helpers::shader_element::ShaderRenderElement;
+ use crate::render_helpers::solid_color::{SolidColorBuffer, SolidColorRenderElement};
+ use crate::render_helpers::surface::push_elements_from_surface_tree;
+ use crate::render_helpers::texture::TextureBuffer;
+@@ -212,6 +213,8 @@ pub struct SavedKeyboardState {
+ }
+ 
+ pub struct Niri {
++    /// midve: the output the pointer was last over (see `update_overview_hover`).
++    pub overview_pointer_output: Option<Output>,
+     pub config: Rc<RefCell<Config>>,
+ 
+     /// Output config from the config file.
+@@ -1223,6 +1226,9 @@ impl State {
+ 
+         let pointer = &self.niri.seat.get_pointer().unwrap();
+         let location = pointer.current_location();
++        // midve: track the overview card under the pointer (moving between cards doesn't
++        // change the Wayland contents, so this must run before the early return below).
++        self.niri.update_overview_hover(location);
+         let mut under = match self.niri.pointer_visibility {
+             PointerVisibility::Disabled => PointContents::default(),
+             _ => self.niri.contents_under(location),
+@@ -1370,7 +1376,9 @@ impl State {
+             let focus_on_layer =
+                 |layer| excl_focus_on_layer(layer).or_else(|| on_d_focus_on_layer(layer));
+ 
+-            let is_overview_open = self.niri.layout.is_overview_open();
++            // midve: the overview has the keyboard only while its own output is the active
++            // one; focus a window on another monitor and typing goes to that window.
++            let is_overview_open = self.niri.layout.is_overview_open_on(output);
+ 
+             let mut surface = grab_on_layer(Layer::Overlay);
+             // FIXME: we shouldn't prioritize the top layer grabs over regular overlay input or a
+@@ -2768,6 +2776,7 @@ impl Niri {
+ 
+         drop(config_);
+         let mut niri = Self {
++            overview_pointer_output: None,
+             config,
+             config_file_output_config,
+             config_file_watcher: None,
+@@ -3546,13 +3555,51 @@ impl Niri {
+         false
+     }
+ 
++    /// midve: the surface of the overview HUD (a layer surface placed within the backdrop)
++    /// under the point, where it has input. Its input region covers only its widgets.
++    pub fn backdrop_hud_under(
++        &self,
++        output: &Output,
++        layers: &LayerMap,
++        pos_within_output: Point<f64, Logical>,
++    ) -> Option<((WlSurface, Point<f64, Logical>), LayerSurface)> {
++        let open = self
++            .layout
++            .monitor_for_output(output)
++            .map_or(0., |mon| mon.overview_open_amount());
++        layers
++            .layers_on(Layer::Background)
++            .rev()
++            .find_map(|layer_surface| {
++                let mapped = self.mapped_layer_surfaces.get(layer_surface)?;
++                if !mapped.place_within_backdrop() {
++                    return None;
++                }
++                let layer_pos_within_output =
++                    layers.layer_geometry(layer_surface).unwrap().loc.to_f64();
++                // The HUD is drawn in perspective: find the flat point that shows under the
++                // pointer, and place the surface so the client gets that point.
++                let pos_within_layer = pos_within_output - layer_pos_within_output;
++                let flat = mapped.hud_unproject(pos_within_layer, open)?;
++                layer_surface
++                    .surface_under(flat, WindowSurfaceType::ALL)
++                    .map(|(surface, surface_pos)| {
++                        let surface_pos =
++                            surface_pos.to_f64() + layer_pos_within_output + (pos_within_layer - flat);
++                        ((surface, surface_pos), layer_surface.clone())
++                    })
++            })
++    }
++
+     pub fn is_layout_obscured_under(
+         &self,
+         output: &Output,
+         pos_within_output: Point<f64, Logical>,
+     ) -> bool {
+         if self.layout.is_overview_open_on(output) {
+-            return false;
++            // midve: a widget of the overview HUD covers the overview there.
++            let layers = layer_map_for_output(output);
++            return self.backdrop_hud_under(output, &layers, pos_within_output).is_some();
+         }
+ 
+         // Check if some layer-shell surface is on top.
+@@ -3729,6 +3776,14 @@ impl Niri {
+                         return None;
+                     }
+ 
++                    // midve: a bar that slid away for the overview takes no input.
++                    if layer == Layer::Top
++                        && mapped.is_edge_bar()
++                        && self.layout.is_overview_open_on(output)
++                    {
++                        return None;
++                    }
++
+                     let mut layer_pos_within_output =
+                         layers.layer_geometry(layer_surface).unwrap().loc.to_f64();
+                     layer_pos_within_output += mapped.bob_offset();
+@@ -3763,6 +3818,15 @@ impl Niri {
+         let layer_toplevel_under = |layer| layer_surface_under(layer, false);
+         let layer_popup_under = |layer| layer_surface_under(layer, true);
+ 
++        // midve: in the overview, surfaces placed within the backdrop (the overview HUD) take
++        // the pointer where they have input. They don't move or zoom with the workspaces, and
++        // their input region covers only their widgets, so empty backdrop still belongs to the
++        // overview.
++        let backdrop_under = || {
++            self.backdrop_hud_under(output, &layers, pos_within_output)
++                .map(|(s, l)| (Some(s), (None, Some(l))))
++        };
++
+         let mapped_hit_data = |(mapped, hit): (&Mapped, HitType)| {
+             let window = &mapped.window;
+             let surface_and_pos = if let HitType::Input { win_pos } = hit {
+@@ -3823,7 +3887,11 @@ impl Niri {
+                 .or_else(|| layer_toplevel_under(Layer::Top));
+ 
+             if is_overview_open && under.is_none() {
+-                rv.overview = true;
++                // midve: a widget of the overview HUD is not a click on the overview.
++                under = backdrop_under();
++                if under.is_none() {
++                    rv.overview = true;
++                }
+             }
+ 
+             under = under.or_else(interactive_moved_window_under);
+@@ -3857,6 +3925,46 @@ impl Niri {
+         rv
+     }
+ 
++    /// midve: tell each monitor which overview card the pointer is over.
++    pub fn update_overview_hover(&mut self, pos: Point<f64, Logical>) {
++        // midve: the pointer coming onto the output where the overview is open makes that
++        // output the active one again, so the keyboard (arrows, Enter, Escape) and clicks work
++        // on the overview after doing something on another monitor. Only on crossing, so
++        // focusing another monitor from the keyboard isn't undone while the pointer rests here.
++        let under = self.global_space.output_under(pos).next().cloned();
++        if under != self.overview_pointer_output {
++            self.overview_pointer_output = under.clone();
++            if let Some(output) = under {
++                if self.layout.is_overview_open_on(&output)
++                    && self.layout.active_output() != Some(&output)
++                {
++                    self.layout.focus_output(&output);
++                    self.queue_redraw_all();
++                }
++            }
++        }
++
++        let outputs: Vec<Output> = self.global_space.outputs().cloned().collect();
++        for output in outputs {
++            let mut id = None;
++            if self.layout.is_overview_open_on(&output) {
++                if let Some(geo) = self.global_space.output_geometry(&output) {
++                    if geo.to_f64().contains(pos) {
++                        let pos_within = pos - geo.loc.to_f64();
++                        if let Some(mon) = self.layout.monitor_for_output(&output) {
++                            id = mon.workspace_under_narrow(pos_within).map(|ws| ws.id());
++                        }
++                    }
++                }
++            }
++            if let Some(mon) = self.layout.monitor_for_output_mut(&output) {
++                if mon.set_overview_hover(id) {
++                    self.queue_redraw(&output);
++                }
++            }
++        }
++    }
++
+     pub fn output_under_cursor(&self) -> Option<Output> {
+         let pos = self.seat.get_pointer().unwrap().current_location();
+         self.global_space.output_under(pos).next().cloned()
+@@ -4703,6 +4811,16 @@ impl Niri {
+         // Get layer-shell elements.
+         let layer_map = layer_map_for_output(output);
+ 
++        // midve: bars on the top layer slide out past their edge as the overview opens.
++        let bar_hide = mon.overview_open_amount();
++        // midve: the HUD's system panel follows the cards' stash on this output.
++        let hud_sys = mon.overview_stash_amount();
++        for surface in layer_map.layers() {
++            if let Some(mapped) = self.mapped_layer_surfaces.get(surface) {
++                mapped.set_hud_sys(hud_sys);
++            }
++        }
++
+         // We use macros instead of closures to avoid borrowing issues (renderer and push() go
+         // into different functions).
+         macro_rules! push_popups_from_layer {
+@@ -4714,6 +4832,7 @@ impl Niri {
+                     $layer,
+                     $xray_pos,
+                     $backdrop,
++                    if matches!($layer, Layer::Top | Layer::Background) { bar_hide } else { 0. },
+                     $push,
+                 );
+             }};
+@@ -4740,6 +4859,7 @@ impl Niri {
+                     $layer,
+                     $xray_pos,
+                     $backdrop,
++                    if matches!($layer, Layer::Top | Layer::Background) { bar_hide } else { 0. },
+                     $push,
+                 );
+             }};
+@@ -4770,7 +4890,7 @@ impl Niri {
+ 
+             mon.render_insert_hint_between_workspaces(ctx.renderer, &mut |elem| push(elem.into()));
+ 
+-            mon.render_workspaces(ctx.r(), focus_ring, &mut |elem| push(elem.into()));
++            mon.render_workspaces(ctx.r(), focus_ring, None, &mut |elem| push(elem.into()));
+ 
+             push_popups_from_layer!(Layer::Top);
+             push_normal_from_layer!(Layer::Top);
+@@ -4804,34 +4924,106 @@ impl Niri {
+                 }};
+             }
+ 
+-            for (ws, geo) in mon.workspaces_with_render_geo() {
+-                let ns = Some(ws.id().get() as usize);
+-                let xray_pos = XrayPos::new(geo.loc, zoom);
+-                push_popups_from_layer!(Layer::Bottom, ns, xray_pos, process!(geo));
+-                push_popups_from_layer!(Layer::Background, ns, xray_pos, process!(geo));
+-            }
+-
+-            mon.render_workspaces(ctx.r(), focus_ring, &mut |elem| push(elem.into()));
++            // midve: in the overview, each workspace is drawn into its own texture and shown as
++            // a card in perspective; otherwise everything goes straight to the output.
++            // midve: cards until the very end of the close: the plain path at a zoom just under
++            // 1 shows slivers of the neighbouring columns at the sides (a white flash).
++            let tilting = mon.overview_open_amount() > 0.
++                && shaders::Shaders::get(ctx.renderer)
++                    .program(shaders::ProgramType::Tilt)
++                    .is_some();
++            mon.tilt_data.borrow_mut().clear();
++
++            if tilting {
++                let idx_geo: Vec<_> = mon.workspaces_with_render_geo_idx().collect();
++                let mut labels = Vec::new();
++                for ((idx, ws), geo) in idx_geo {
++                    let ws_id = ws.id();
++                    let ns = Some(ws_id.get() as usize);
++                    // The card's contents are drawn at a fixed zoom with their origin at
++                    // (0, 0); the card's place and pose on screen are the shader's job.
++                    let tex_zoom = mon.overview_card_tex_zoom(geo);
++                    let tex_geo = Rectangle::from_size(mon.view_size().upscale(tex_zoom));
++                    let xray_pos = XrayPos::new(tex_geo.loc, tex_zoom);
++                    let mut elems: Vec<OutputRenderElements<GlesRenderer>> = Vec::new();
++                    let mut gctx = ctx.as_gles();
++                    {
++                        let mut put = |elem| {
++                            if let Some(e) = scale_relocate_crop(elem, output_scale, tex_zoom, tex_geo) {
++                                elems.push(e.into());
++                            }
++                        };
++                        for layer in [Layer::Bottom, Layer::Background] {
++                            self.render_layer_popups(
++                                gctx.r(), ns, &layer_map, layer, xray_pos, false, 0., &mut put,
++                            );
++                        }
++                    }
++                    mon.render_workspaces(gctx.r(), focus_ring, Some((ws_id, tex_zoom)), &mut |e| {
++                        elems.push(e.into())
++                    });
++                    {
++                        let mut put = |elem| {
++                            if let Some(e) = scale_relocate_crop(elem, output_scale, tex_zoom, tex_geo) {
++                                elems.push(e.into());
++                            }
++                        };
++                        for layer in [Layer::Bottom, Layer::Background] {
++                            self.render_layer_normal(
++                                gctx.r(), ns, &layer_map, layer, xray_pos, false, 0., &mut put,
++                            );
++                        }
++                    }
++                    if let Some(e) =
++                        scale_relocate_crop(ws.render_background(), output_scale, tex_zoom, tex_geo)
++                    {
++                        elems.push(e.into());
++                    }
++                    if let Some(card) = mon.render_tilted_card(gctx.renderer, idx, geo, tex_zoom, &elems) {
++                        push(card.into());
++                    }
++                    let markup = overview_card_markup(ws, idx, idx == mon.active_workspace_idx());
++                    if let Some(label) = mon.render_card_label(gctx.renderer, idx, geo, &markup) {
++                        labels.push(label);
++                    }
++                }
++                // Labels go under every card: a card that comes forward covers them, and no
++                // label is ever drawn over another row's card.
++                for label in labels {
++                    push(label.into());
++                }
++            } else {
++                for (ws, geo) in mon.workspaces_with_render_geo() {
++                    let ns = Some(ws.id().get() as usize);
++                    let xray_pos = XrayPos::new(geo.loc, zoom);
++                    push_popups_from_layer!(Layer::Bottom, ns, xray_pos, process!(geo));
++                    push_popups_from_layer!(Layer::Background, ns, xray_pos, process!(geo));
++                }
+ 
+-            for (ws, geo) in mon.workspaces_with_render_geo() {
+-                // The render element namespace. This will be set to the workspace index for
+-                // elements duplicated across workspaces (i.e. background and bottom layers) in
+-                // order to have their non-xray framebuffer effects separated from each other.
+-                //
+-                // This doesn't have to correspond exactly to workspace id or idx, the only
+-                // requirement is that there's only one framebuffer effect element with a given id +
+-                // namespace on the frame at once. Id + namespace is used as the cache key in the
+-                // damage tracker.
+-                let ns = Some(ws.id().get() as usize);
+-                let xray_pos = XrayPos::new(geo.loc, zoom);
+-                push_normal_from_layer!(Layer::Bottom, ns, xray_pos, process!(geo));
+-                push_normal_from_layer!(Layer::Background, ns, xray_pos, process!(geo));
++                mon.render_workspaces(ctx.r(), focus_ring, None, &mut |elem| push(elem.into()));
+ 
+-                process!(geo)(ws.render_background());
++                for (ws, geo) in mon.workspaces_with_render_geo() {
++                    // The render element namespace. This will be set to the workspace index for
++                    // elements duplicated across workspaces (i.e. background and bottom layers) in
++                    // order to have their non-xray framebuffer effects separated from each other.
++                    //
++                    // This doesn't have to correspond exactly to workspace id or idx, the only
++                    // requirement is that there's only one framebuffer effect element with a given id +
++                    // namespace on the frame at once. Id + namespace is used as the cache key in the
++                    // damage tracker.
++                    let ns = Some(ws.id().get() as usize);
++                    let xray_pos = XrayPos::new(geo.loc, zoom);
++                    push_normal_from_layer!(Layer::Bottom, ns, xray_pos, process!(geo));
++                    push_normal_from_layer!(Layer::Background, ns, xray_pos, process!(geo));
++
++                    process!(geo)(ws.render_background());
++                }
+             }
+         }
+ 
+-        mon.render_workspace_shadows(ctx.renderer, &mut |elem| push(elem.into()));
++        if mon.tilt_data.borrow().is_empty() {
++            mon.render_workspace_shadows(ctx.renderer, &mut |elem| push(elem.into()));
++        }
+ 
+         // Then the backdrop.
+         push_popups_from_layer!(Layer::Background, true);
+@@ -4873,6 +5065,7 @@ impl Niri {
+                 Layer::Background,
+                 XrayPos::default(),
+                 false,
++                0.,
+                 &mut |elem| elements.push(elem.into()),
+             );
+             // Avoid unused capacity remaining forever.
+@@ -4890,6 +5083,7 @@ impl Niri {
+                 Layer::Background,
+                 XrayPos::default(),
+                 true,
++                0.,
+                 &mut |elem| elements.push(elem.into()),
+             );
+             // Avoid unused capacity remaining forever.
+@@ -4954,12 +5148,13 @@ impl Niri {
+         layer: Layer,
+         xray_pos: XrayPos,
+         for_backdrop: bool,
++        hide: f64,
+         push: &mut dyn FnMut(LayerSurfaceRenderElement<R>),
+     ) {
+         for (mapped, geo) in self.layers_in_render_order(layer_map, layer, for_backdrop) {
+             let loc = geo.loc.to_f64();
+             let xray_pos = xray_pos.offset(loc);
+-            mapped.render_normal(ctx.r(), ns, loc, xray_pos, push);
++            mapped.render_normal(ctx.r(), ns, loc, xray_pos, hide, push);
+         }
+     }
+ 
+@@ -4972,12 +5167,13 @@ impl Niri {
+         layer: Layer,
+         xray_pos: XrayPos,
+         for_backdrop: bool,
++        hide: f64,
+         push: &mut dyn FnMut(LayerSurfaceRenderElement<R>),
+     ) {
+         for (mapped, geo) in self.layers_in_render_order(layer_map, layer, for_backdrop) {
+             let loc = geo.loc.to_f64();
+             let xray_pos = xray_pos.offset(loc);
+-            mapped.render_popups(ctx.r(), ns, loc, xray_pos, push);
++            mapped.render_popups(ctx.r(), ns, loc, xray_pos, hide, push);
+         }
+     }
+ 
+@@ -5213,6 +5409,14 @@ impl Niri {
+         // The reason to do this at all is that it keeps track of whether the surface is visible or
+         // not in a unified way with the pointer surfaces, which makes the logic elsewhere simpler.
+ 
++        // midve: windows in the overview's perspective cards are drawn into the cards'
++        // offscreens; count them as shown through the card, or they'd get frame callbacks only
++        // at the throttled rate and update once a second in the overview.
++        let tilt_data = self
++            .layout
++            .monitor_for_output(output)
++            .map(|mon| mon.tilt_data.borrow());
++
+         for mapped in self.layout.windows_for_output(output) {
+             let win = &mapped.window;
+             let offscreen_data = mapped.offscreen_data();
+@@ -5252,6 +5456,14 @@ impl Niri {
+                     // enough to fix (need an extra check).
+                 }
+ 
++                if !render_element_states.element_was_presented(id.clone()) {
++                    if let Some(card) = tilt_data.as_ref().and_then(|t| {
++                        t.iter().find(|d| d.states.element_was_presented(id.clone()))
++                    }) {
++                        id = card.id.clone();
++                    }
++                }
++
+                 primary_scanout_output.update_from_render_element_states(
+                     id,
+                     output,
+@@ -5283,6 +5495,17 @@ impl Niri {
+                 // FIXME: this won't work if there's another layer of offscreen (e.g. window with
+                 // an xray background during its opening animation). But hopefully with the
+                 // refactor to draw background effects outside offscreens it won't be a problem.
++                // midve: the overview HUD is drawn through its own offscreen.
++                if is_background && !render_element_states.element_was_presented(id.clone()) {
++                    if let Some(hud_id) = self
++                        .mapped_layer_surfaces
++                        .get(layer)
++                        .and_then(|m| m.hud_offscreen_id_for(&id))
++                    {
++                        id = hud_id;
++                    }
++                }
++
+                 if is_background && !render_element_states.element_was_presented(id.clone()) {
+                     // A layer may be present either in background or backdrop, never in both.
+                     if xray_bg
+@@ -7422,5 +7645,36 @@ niri_render_elements! {
+         Texture = PrimaryGpuTextureRenderElement,
+         // Used for the CPU-rendered panels.
+         RelocatedMemoryBuffer = RelocateRenderElement<MemoryRenderBufferRenderElement<R>>,
++        // midve: overview workspace cards in perspective.
++        TiltCard = ShaderRenderElement,
+     }
+ }
++
++/// midve: the text under an overview card: the workspace's number (or name), lilac on the
++/// current one, then the apps open on it, each once, by short name.
++fn overview_card_markup(ws: &crate::layout::workspace::Workspace<Mapped>, idx: usize, active: bool) -> String {
++    let mut apps: Vec<String> = Vec::new();
++    for mapped in ws.windows() {
++        let app = crate::utils::with_toplevel_role(mapped.toplevel(), |role| role.app_id.clone()).unwrap_or_default();
++        let mut parts: Vec<&str> = app.split('.').filter(|p| !p.is_empty()).collect();
++        if parts.len() > 1 && parts.last().is_some_and(|p| p.eq_ignore_ascii_case("desktop")) {
++            parts.pop();
++        }
++        let short = parts.last().copied().unwrap_or("").to_lowercase();
++        let short = if short.is_empty() { String::from("window") } else { short };
++        if !apps.contains(&short) {
++            apps.push(short);
++        }
++    }
++    let num = ws.name().cloned().unwrap_or_else(|| (idx + 1).to_string());
++    let num = pangocairo::glib::markup_escape_text(&num);
++    let color = if active { "#dcc3e4" } else { "#ece0ee" };
++    let mut s = format!("<span weight='600' foreground='{color}'>{num}</span>");
++    if apps.is_empty() {
++        s.push_str("<span foreground='#6f606d'>   empty</span>");
++    } else {
++        let list = apps.iter().map(|a| pangocairo::glib::markup_escape_text(a).to_string()).collect::<Vec<_>>().join(" · ");
++        s.push_str(&format!("<span foreground='#9a8a98'>   {list}</span>"));
++    }
++    s
++}
+diff --git a/src/render_helpers/shader_element.rs b/src/render_helpers/shader_element.rs
+index f1bf978b..f973a072 100644
+--- a/src/render_helpers/shader_element.rs
++++ b/src/render_helpers/shader_element.rs
+@@ -242,6 +242,18 @@ impl ShaderRenderElement {
+         self.commit_counter.increment();
+     }
+ 
++    /// midve: hand the input textures back without damage. A cached offscreen texture can only
++    /// be drawn into again while nothing else holds it, so a cached element lets go of it before
++    /// the offscreen renders and takes the same texture back afterwards.
++    pub fn take_textures(&mut self) -> HashMap<String, GlesTexture> {
++        std::mem::take(&mut self.textures)
++    }
++
++    /// midve: put textures back without damage (see `take_textures`).
++    pub fn restore_textures(&mut self, textures: HashMap<String, GlesTexture>) {
++        self.textures = textures;
++    }
++
+     pub fn with_location(mut self, location: Point<f64, Logical>) -> Self {
+         self.area.loc = location;
+         self
+diff --git a/src/render_helpers/shaders/hud_tilt.frag b/src/render_helpers/shaders/hud_tilt.frag
+new file mode 100644
+index 00000000..e6eadc2a
+--- /dev/null
++++ b/src/render_helpers/shaders/hud_tilt.frag
+@@ -0,0 +1,73 @@
++// midve: one flank (half) of the overview HUD, turned in perspective by niri.
++//
++// tilt_input_to_uv maps the element's quad to the half's uv (the inverse of its homography);
++// tilt_uv_to_tex maps that uv into the HUD's offscreen texture (drawn at the client's buffer
++// scale). tilt_px is one physical pixel in quad coordinates, tilt_tex_px the texture's size in
++// texels; together they give each pixel's footprint for the filter below.
++
++precision highp float;
++
++#if defined(DEBUG_FLAGS)
++uniform float niri_tint;
++#endif
++
++varying vec2 niri_v_coords;
++uniform float niri_alpha;
++
++uniform sampler2D niri_tex;
++uniform mat3 tilt_input_to_uv;
++uniform mat3 tilt_uv_to_tex;
++uniform vec2 tilt_px;
++uniform vec2 tilt_tex_px;
++
++vec2 tex_at(vec2 at) {
++    vec3 q = tilt_input_to_uv * vec3(at, 1.0);
++    vec3 t = tilt_uv_to_tex * vec3(q.xy / q.z, 1.0);
++    return t.st;
++}
++
++vec4 tap(vec2 at) {
++    vec3 q = tilt_input_to_uv * vec3(at, 1.0);
++    if (q.z <= 0.0)
++        return vec4(0.0);
++    vec2 uv = q.xy / q.z;
++    if (uv.x < 0.0 || uv.x > 1.0 || uv.y < 0.0 || uv.y > 1.0)
++        return vec4(0.0);
++    vec3 t = tilt_uv_to_tex * vec3(uv, 1.0);
++    return texture2D(niri_tex, t.st);
++}
++
++// Adaptive supersampling over the pixel's own footprint on the texture: one bilinear tap where
++// the texture is magnified or 1:1 (no extra softening), and an n×m grid of taps (up to 4×4)
++// where the perspective squeezes several texels into one pixel, so receding text and lines
++// neither blur nor shimmer.
++vec4 filtered(vec2 c) {
++    vec2 t0 = tex_at(c);
++    vec2 du = (tex_at(c + vec2(tilt_px.x, 0.0)) - t0) * tilt_tex_px;
++    vec2 dv = (tex_at(c + vec2(0.0, tilt_px.y)) - t0) * tilt_tex_px;
++    int nx = int(clamp(ceil(length(du) - 0.15), 1.0, 4.0));
++    int ny = int(clamp(ceil(length(dv) - 0.15), 1.0, 4.0));
++    vec4 sum = vec4(0.0);
++    for (int j = 0; j < 4; j++) {
++        if (j >= ny) break;
++        for (int i = 0; i < 4; i++) {
++            if (i >= nx) break;
++            vec2 o = vec2((float(i) + 0.5) / float(nx) - 0.5, (float(j) + 0.5) / float(ny) - 0.5);
++            sum += tap(c + tilt_px * o);
++        }
++    }
++    return sum / float(nx * ny);
++}
++
++void main() {
++    vec2 c = niri_v_coords;
++    vec4 color = filtered(c);
++    color = color * niri_alpha;
++
++#if defined(DEBUG_FLAGS)
++    if (niri_tint == 1.0)
++        color = vec4(0.0, 0.2, 0.0, 0.2) + color * 0.8;
++#endif
++
++    gl_FragColor = color;
++}
+diff --git a/src/render_helpers/shaders/mod.rs b/src/render_helpers/shaders/mod.rs
+index 7be9b159..e1bdc74f 100644
+--- a/src/render_helpers/shaders/mod.rs
++++ b/src/render_helpers/shaders/mod.rs
+@@ -18,6 +18,12 @@ pub struct Shaders {
+     pub resize: Option<ShaderProgram>,
+     pub gradient_fade: Option<GlesTexProgram>,
+     pub blur: Option<BlurProgram>,
++    /// midve: overview cards in perspective.
++    pub tilt: Option<ShaderProgram>,
++    /// midve: overview card labels, in the cards' planes.
++    pub tilt_label: Option<ShaderProgram>,
++    /// midve: the overview HUD's flanks in perspective.
++    pub hud_tilt: Option<ShaderProgram>,
+     pub custom_resize: RefCell<Option<ShaderProgram>>,
+     pub custom_close: RefCell<Option<ShaderProgram>>,
+     pub custom_open: RefCell<Option<ShaderProgram>>,
+@@ -30,6 +36,9 @@ pub enum ProgramType {
+     Resize,
+     Close,
+     Open,
++    Tilt,
++    TiltLabel,
++    HudTilt,
+ }
+ 
+ impl Shaders {
+@@ -148,6 +157,54 @@ impl Shaders {
+             })
+             .ok();
+ 
++        let tilt = ShaderProgram::compile(
++            renderer,
++            include_str!("tilt.frag"),
++            &[
++                UniformName::new("tilt_input_to_uv", UniformType::Matrix3x3),
++                UniformName::new("tilt_uv_to_tex", UniformType::Matrix3x3),
++                UniformName::new("tilt_card_px", UniformType::_2f),
++                UniformName::new("tilt_glow", UniformType::_1f),
++                UniformName::new("tilt_flash", UniformType::_1f),
++                UniformName::new("tilt_glint", UniformType::_1f),
++                UniformName::new("tilt_px", UniformType::_2f),
++                UniformName::new("tilt_tex_px", UniformType::_2f),
++                UniformName::new("tilt_frame", UniformType::_1f),
++            ],
++            &["niri_tex"],
++        )
++        .map_err(|err| {
++            warn!("error compiling overview tilt shader: {err:?}");
++        })
++        .ok();
++
++        let tilt_label = ShaderProgram::compile(
++            renderer,
++            include_str!("tilt_label.frag"),
++            &[UniformName::new("tilt_input_to_uv", UniformType::Matrix3x3)],
++            &["niri_tex"],
++        )
++        .map_err(|err| {
++            warn!("error compiling overview label shader: {err:?}");
++        })
++        .ok();
++
++        let hud_tilt = ShaderProgram::compile(
++            renderer,
++            include_str!("hud_tilt.frag"),
++            &[
++                UniformName::new("tilt_input_to_uv", UniformType::Matrix3x3),
++                UniformName::new("tilt_uv_to_tex", UniformType::Matrix3x3),
++                UniformName::new("tilt_px", UniformType::_2f),
++                UniformName::new("tilt_tex_px", UniformType::_2f),
++            ],
++            &["niri_tex"],
++        )
++        .map_err(|err| {
++            warn!("error compiling overview HUD shader: {err:?}");
++        })
++        .ok();
++
+         Self {
+             border,
+             shadow,
+@@ -156,6 +213,9 @@ impl Shaders {
+             resize,
+             gradient_fade,
+             blur,
++            tilt,
++            tilt_label,
++            hud_tilt,
+             custom_resize: RefCell::new(None),
+             custom_close: RefCell::new(None),
+             custom_open: RefCell::new(None),
+@@ -207,6 +267,9 @@ impl Shaders {
+                 .or_else(|| self.resize.clone()),
+             ProgramType::Close => self.custom_close.borrow().clone(),
+             ProgramType::Open => self.custom_open.borrow().clone(),
++            ProgramType::Tilt => self.tilt.clone(),
++            ProgramType::TiltLabel => self.tilt_label.clone(),
++            ProgramType::HudTilt => self.hud_tilt.clone(),
+         }
+     }
+ }
+diff --git a/src/render_helpers/shaders/tilt.frag b/src/render_helpers/shaders/tilt.frag
+new file mode 100644
+index 00000000..c47855da
+--- /dev/null
++++ b/src/render_helpers/shaders/tilt.frag
+@@ -0,0 +1,127 @@
++// midve: a workspace card in the overview, drawn with real perspective.
++//
++// The quad covers the card's projected bounding box plus room for its shadow.
++// For every pixel, tilt_input_to_uv (the inverse of the card's homography)
++// gives the point on the flat card it shows; the card's texture is sampled
++// there. Outside the card: a soft shadow, and a lilac glow on the current
++// workspace.
++
++precision highp float;
++
++#if defined(DEBUG_FLAGS)
++uniform float niri_tint;
++#endif
++
++varying vec2 niri_v_coords;
++uniform vec2 niri_size;
++uniform float niri_scale;
++uniform float niri_alpha;
++
++uniform sampler2D niri_tex;
++uniform mat3 tilt_input_to_uv;
++uniform mat3 tilt_uv_to_tex;
++// The card's size in physical pixels: turns uv distances into pixels for
++// antialiased edges and the shadow falloff.
++uniform vec2 tilt_card_px;
++// 0..1: the lilac rim and glow of the current workspace.
++uniform float tilt_glow;
++// 0..1: a short lilac flash along the rim when a card seats into its slot.
++uniform float tilt_flash;
++// One physical pixel in quad coordinates, and the texture's size in texels: together they give
++// each pixel's footprint on the texture for the adaptive filter.
++uniform vec2 tilt_px;
++uniform vec2 tilt_tex_px;
++// 0..1: the card's frame (rounded corners, hairline, shadow). It goes to 0 as the card becomes
++// the whole output, so entering a workspace lands without a pop.
++uniform float tilt_frame;
++// A soft glint crossing the card once (it turned to face the pointer): 0..1 across, or < 0.
++uniform float tilt_glint;
++
++vec4 card_tap(vec2 at) {
++    vec3 q = tilt_input_to_uv * vec3(at, 1.0);
++    vec2 uv = clamp(q.xy / q.z, 0.0, 1.0);
++    vec3 t = tilt_uv_to_tex * vec3(uv, 1.0);
++    return texture2D(niri_tex, t.st);
++}
++
++vec2 card_tex_at(vec2 at) {
++    vec3 q = tilt_input_to_uv * vec3(at, 1.0);
++    vec3 t = tilt_uv_to_tex * vec3(q.xy / q.z, 1.0);
++    return t.st;
++}
++
++// Adaptive supersampling over the pixel's own footprint on the texture: one bilinear tap where
++// the texture is magnified or 1:1 (no extra softening), and an n×m grid of taps (up to 4×4)
++// where the perspective squeezes several texels into one pixel, so receding text and lines
++// neither blur nor shimmer.
++vec4 card_filtered(vec2 c) {
++    vec2 t0 = card_tex_at(c);
++    vec2 du = (card_tex_at(c + vec2(tilt_px.x, 0.0)) - t0) * tilt_tex_px;
++    vec2 dv = (card_tex_at(c + vec2(0.0, tilt_px.y)) - t0) * tilt_tex_px;
++    int nx = int(clamp(ceil(length(du) - 0.15), 1.0, 4.0));
++    int ny = int(clamp(ceil(length(dv) - 0.15), 1.0, 4.0));
++    vec4 sum = vec4(0.0);
++    for (int j = 0; j < 4; j++) {
++        if (j >= ny) break;
++        for (int i = 0; i < 4; i++) {
++            if (i >= nx) break;
++            vec2 o = vec2((float(i) + 0.5) / float(nx) - 0.5, (float(j) + 0.5) / float(ny) - 0.5);
++            sum += card_tap(c + tilt_px * o);
++        }
++    }
++    return sum / float(nx * ny);
++}
++
++void main() {
++    vec4 color = vec4(0.0);
++    vec3 q = tilt_input_to_uv * vec3(niri_v_coords, 1.0);
++
++    if (q.z > 0.0) {
++        vec2 uv = q.xy / q.z;
++        // Rounded rectangle in the card's own pixels (signed distance, < 0 inside), with the
++        // same soft corners as the HUD's panels.
++        float r = max(10.0 * niri_scale * tilt_frame, 0.001);
++        vec2 half_px = tilt_card_px * 0.5;
++        vec2 d2 = abs(uv * tilt_card_px - half_px) - (half_px - vec2(r));
++        float sd = length(max(d2, 0.0)) + min(max(d2.x, d2.y), 0.0) - r;
++        float inside = -sd;
++        float outside = max(sd, 0.0);
++
++        // the card itself, antialiased to one pixel
++        float cover = clamp(inside + 0.5, 0.0, 1.0);
++        if (cover > 0.0) {
++            vec4 c = card_filtered(niri_v_coords);
++            float rim = (tilt_glow * 0.85 + tilt_flash) * (1.0 - smoothstep(0.0, 2.5 * niri_scale, inside));
++            c = mix(c, vec4(0.863, 0.765, 0.894, 1.0), clamp(rim, 0.0, 1.0));
++            // every card: a faint hairline along its edge, like the panels' borders
++            float hair = 0.14 * tilt_frame * (1.0 - smoothstep(0.0, 1.2 * niri_scale, inside)) * (1.0 - tilt_glow);
++            c = mix(c, vec4(0.925, 0.878, 0.933, 1.0), hair);
++            // the glint: a soft band, like light on glass, from the upper left to the lower
++            // right; it swells in the middle of its way and is gone at both ends
++            if (tilt_glint >= 0.0) {
++                vec2 p = uv * tilt_card_px;
++                float s = (p.x + 0.55 * p.y) / (tilt_card_px.x + 0.55 * tilt_card_px.y);
++                float d = (s - mix(-0.2, 1.2, tilt_glint)) / 0.075;
++                float g = 0.10 * exp(-d * d) * sin(3.14159265 * tilt_glint);
++                c.rgb += vec3(0.96, 0.93, 0.98) * g * c.a;
++            }
++            color = c * cover;
++        }
++
++        // shadow below, lilac glow around the current one (premultiplied, under the card)
++        float s = niri_scale;
++        float shadow = 0.34 * tilt_frame * exp(-outside / (14.0 * s)) * (1.0 - cover);
++        float glow = (0.28 * tilt_glow + 0.5 * tilt_flash) * exp(-outside / (9.0 * s)) * (1.0 - cover);
++        vec4 under = vec4(0.024, 0.008, 0.02, 1.0) * shadow + vec4(0.863, 0.765, 0.894, 1.0) * glow;
++        color = color + under * (1.0 - color.a);
++    }
++
++    color = color * niri_alpha;
++
++#if defined(DEBUG_FLAGS)
++    if (niri_tint == 1.0)
++        color = vec4(0.0, 0.2, 0.0, 0.2) + color * 0.8;
++#endif
++
++    gl_FragColor = color;
++}
+diff --git a/src/render_helpers/shaders/tilt_label.frag b/src/render_helpers/shaders/tilt_label.frag
+new file mode 100644
+index 00000000..0e515b0a
+--- /dev/null
++++ b/src/render_helpers/shaders/tilt_label.frag
+@@ -0,0 +1,35 @@
++// midve: a workspace card's label, drawn in the card's own plane.
++//
++// tilt_input_to_uv maps the element's quad to the label's uv (the inverse of
++// the label's homography); outside 0..1 nothing is drawn. The label texture has
++// a transparent border, so its edges need no extra antialiasing.
++
++precision highp float;
++
++#if defined(DEBUG_FLAGS)
++uniform float niri_tint;
++#endif
++
++varying vec2 niri_v_coords;
++uniform float niri_alpha;
++
++uniform sampler2D niri_tex;
++uniform mat3 tilt_input_to_uv;
++
++void main() {
++    vec4 color = vec4(0.0);
++    vec3 q = tilt_input_to_uv * vec3(niri_v_coords, 1.0);
++    if (q.z > 0.0) {
++        vec2 uv = q.xy / q.z;
++        if (uv.x >= 0.0 && uv.x <= 1.0 && uv.y >= 0.0 && uv.y <= 1.0)
++            color = texture2D(niri_tex, uv);
++    }
++    color = color * niri_alpha;
++
++#if defined(DEBUG_FLAGS)
++    if (niri_tint == 1.0)
++        color = vec4(0.0, 0.2, 0.0, 0.2) + color * 0.8;
++#endif
++
++    gl_FragColor = color;
++}
