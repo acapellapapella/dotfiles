@@ -34,3 +34,9 @@ layer-rule {
 // the gaps between them, on one surface, so niri would blur and shade one big
 // rectangle around the whole stack. mako paints its own near-opaque drops.
 
+// Overview HUD (overview-hud/): lives in the overview backdrop, behind the
+// workspace cards. With the patch it gets the pointer where its widgets are.
+layer-rule {
+    match namespace="^midve-hud$"
+    place-within-backdrop true
+}

@@ -66,6 +66,10 @@ python3 -I "$repo/desktop/config/cursor/midve-cursor.py"
 # Waybar workspaces: the niri-drops module (~/.local/lib/waybar/niri-drops.so).
 make -s -C "$repo/$niri/waybar-niri/drops" install
 
+# Overview HUD (~/.local/bin/midve-hud). It needs niri built with
+# patches/zz-niri-overview-hud.patch (in /etc/portage/patches/gui-wm/niri/).
+make -s -C "$repo/$niri/overview-hud/src" install
+
 # UI font: Onest (OFL, Google Fonts), installed per user.
 if ! fc-list : family | grep -qx 'Onest'; then
     mkdir -p "$HOME/.local/share/fonts/Onest"
